@@ -1,0 +1,29 @@
+# Entorno virtual
+signai_env/
+
+# Dataset LSC50 (demasiado grande para git)
+data/VIDEOS.zip
+data/LANDMARKS/
+data/IMU/
+
+# Generados en runtime
+scripts/landmarks/
+app/video_cache/
+
+# Assets externos de Blender
+assets/
+blender/*.blend
+blender/*.blend1
+blender/RiS_StartFiles_v2.zip
+blender/RiS_StartFiles_v2/
+
+# Modelo binario de MediaPipe (descargable)
+scripts/hand_landmarker.task
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Claude Code
+.claude/

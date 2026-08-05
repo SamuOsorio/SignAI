@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SignAI Demo — LSC50</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>SignAI</h1>
+  <span class="tag">LSC50</span>
+
+  <div class="sign-selector">
+    <label for="sign-select">Seña:</label>
+    <select id="sign-select">
+      <option value="">Cargando...</option>
+    </select>
+  </div>
+</header>
+
+<main class="main">
+  <!-- Video original -->
+  <div class="panel">
+    <div class="panel-header">
+      Video original
+      <span id="video-meta"></span>
+    </div>
+    <div class="video-container">
+      <video id="video" muted loop playsinline></video>
+    </div>
+  </div>
+
+  <!-- Avatar 3D -->
+  <div class="panel">
+    <div class="panel-header">
+      Avatar 3D
+      <span id="avatar-meta"></span>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="avatar-canvas"></canvas>
+    </div>
+  </div>
+</main>
+
+<div class="controls">
+  <button class="btn primary" id="btn-play">▶ Reproducir</button>
+  <button class="btn" id="btn-reset">↺ Reiniciar</button>
+  <span class="status" id="status">Cargando avatar...</span>
+</div>
+
+<!-- Three.js desde CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
