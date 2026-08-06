@@ -160,3 +160,23 @@ video {
 
 .badge.green  { background: #06402222; color: #34d399; border: 1px solid #34d39944; }
 .badge.yellow { background: #78350f22; color: #fbbf24; border: 1px solid #fbbf2444; }
+
+.smooth-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: #666;
+}
+
+.smooth-control input[type="range"] {
+  width: 90px;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+#smooth-val {
+  min-width: 2.5ch;
+  color: #888;
+  font-variant-numeric: tabular-nums;
+}

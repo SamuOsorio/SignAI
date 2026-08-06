@@ -178,6 +178,8 @@ DEF-handL
 (ídem con R)
 ```
 
+NOTA: pygltflib lista nodos de escena con nombres diferentes (con puntos). Three.js usa los nombres de skin joints, que son los de arriba (sin puntos). Siempre verificar con `[..._signAI.bones.keys()]` en browser console.
+
 Forma de descubrir nombres en browser console:
 ```js
 [..._signAI.bones.keys()].filter(n => n.includes("thumb"))
@@ -291,6 +293,10 @@ Para animar en Blender con landmarks reales:
 ### Retargeting produce torsión acumulada
 **Causa**: fórmula incorrecta ignoraba el rest world quaternion.
 **Fix**: `targetWorldQ = deltaQ * restWorldQ`, luego `localQ = parentWQ_inv * targetWorldQ`.
+
+### Brazos planos contra el pecho (sin extensión hacia adelante)
+**Causa**: `lmWorldOffset` ponía z=0, forzando los objetivos de muñeca al plano z del hombro. Los brazos se animaban solo en XY — desde el lado se veían aplastados sobre el pecho.
+**Fix**: usar `-(lm.z - lmRef.z) * scale * Z_SCALE` con `Z_SCALE = 0.12`. El factor 0.12 (empírico) da ~0.13 avatar units de extensión frontal — dentro del alcance del brazo (0.52 u). El signo negativo es necesario: MediaPipe z disminuye cuando la mano se acerca a la cámara; en Three.js el +z apunta hacia la cámara.
 
 ---
 
