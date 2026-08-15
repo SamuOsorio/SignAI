@@ -22,15 +22,47 @@ BASE         = Path(__file__).parent.parent
 LSC50_LEFT   = BASE / "data" / "LANDMARKS" / "HANDS_LANDMARKS" / "LEFT_HAND_LANDMARKS"
 LSC50_RIGHT  = BASE / "data" / "LANDMARKS" / "HANDS_LANDMARKS" / "RIGHT_HAND_LANDMARKS"
 LSC50_BODY   = BASE / "data" / "LANDMARKS" / "BODY_LANDMARKS"
+LSC50_FACE   = BASE / "data" / "LANDMARKS" / "FACE_LANDMARKS"
 ZIP_PATH     = BASE / "data" / "VIDEOS.zip"
 STATIC       = Path(__file__).parent / "static"
 VIDEO_CACHE  = Path(__file__).parent / "video_cache"
 VIDEO_CACHE.mkdir(exist_ok=True)
 
+# Subset de los 468 landmarks de FaceMesh usados para animación:
+# boca, comisuras, cejas, párpados, nariz (referencia)
+FACE_KEY_LMS = [
+    13, 14,        # labio superior/inferior centro
+    78, 308,       # comisura izq/der
+    70, 107, 55,   # ceja izq (exterior, centro, interior)
+    300, 336, 285, # ceja der (exterior, centro, interior)
+    159, 145,      # párpado izq (superior, inferior)
+    386, 374,      # párpado der (superior, inferior)
+    1, 168,        # nariz (punta, puente) — referencia estable
+]
+
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="")
 
 
 # ── Parsing de CSVs LSC50 ─────────────────────────────────────────────────────
+
+def parse_face_csv(path: Path) -> list[dict]:
+    """Extrae landmarks clave de cara por frame (boca, cejas, ojos, nariz)."""
+    if not path.exists():
+        return []
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    result = []
+    for row in rows:
+        lms = {}
+        for i in FACE_KEY_LMS:
+            lms[i] = {
+                "x": float(row.get(f"landmark_{i}_x", 0)),
+                "y": float(row.get(f"landmark_{i}_y", 0)),
+                "z": float(row.get(f"landmark_{i}_z", 0)),
+            }
+        result.append(lms)
+    return result
+
 
 def parse_body_csv(path: Path) -> list[list[dict]]:
     """Lee un CSV de 33 landmarks de cuerpo (MediaPipe Pose) por frame."""
@@ -72,10 +104,11 @@ def parse_hand_csv(path: Path, label: str) -> list[dict]:
 
 @functools.lru_cache(maxsize=256)
 def load_sign_landmarks(sign_id: str) -> dict:
-    """Combina left/right hand + body CSVs en el formato JSON que usa el frontend."""
+    """Combina left/right hand + body + face CSVs en el formato JSON que usa el frontend."""
     left_frames  = parse_hand_csv(LSC50_LEFT  / f"{sign_id}.csv", "Left")
     right_frames = parse_hand_csv(LSC50_RIGHT / f"{sign_id}.csv", "Right")
     body_frames  = parse_body_csv(LSC50_BODY  / f"{sign_id}.csv")
+    face_frames  = parse_face_csv(LSC50_FACE  / f"{sign_id}.csv")
 
     n = max(len(left_frames), len(right_frames))
     if n == 0:
@@ -91,6 +124,8 @@ def load_sign_landmarks(sign_id: str) -> dict:
         frame = {"hands": hands}
         if i < len(body_frames):
             frame["body"] = body_frames[i]
+        if i < len(face_frames):
+            frame["face"] = face_frames[i]
         frames.append(frame)
 
     return {

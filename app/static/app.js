@@ -194,7 +194,7 @@ function lmWorldOffset(lm, lmRef, scale, worldRef, out) {
   // Factor empírico 0.12 da extensión razonable (~0.15 u) sin salir del alcance del brazo.
   // Signo: MediaPipe z disminuye cuando la muñeca está frente al cuerpo (más cerca cámara).
   // -(delta_z) es positivo cuando la mano está adelante → Three.js +z = hacia la cámara = correcto.
-  const Z_SCALE = 0.20;
+  const Z_SCALE = 0.40;
   return out.set(
     (lm.x - lmRef.x) * scale,
     -(lm.y - lmRef.y) * scale,
@@ -241,24 +241,32 @@ function applyArmIK(body) {
   const scale = bodyScale(body);
   const g = state.armRest;
 
-  _applyOneArm(body, 11, 13, 15, 19,
-    "DEF-upper_armL", "DEF-upper_armL001", "DEF-forearmL", "DEF-forearmL001", "DEF-handL",
+  _applyOneArm(body, 11, 13, 15,
+    "DEF-upper_armL", "DEF-upper_armL001", "DEF-forearmL", "DEF-forearmL001",
     g.shoulderL, g.L_upperL, g.L_foreL, scale);
 
-  _applyOneArm(body, 12, 14, 16, 20,
-    "DEF-upper_armR", "DEF-upper_armR001", "DEF-forearmR", "DEF-forearmR001", "DEF-handR",
+  _applyOneArm(body, 12, 14, 16,
+    "DEF-upper_armR", "DEF-upper_armR001", "DEF-forearmR", "DEF-forearmR001",
     g.shoulderR, g.L_upperR, g.L_foreR, scale);
 }
 
-function _applyOneArm(body, iS, iE, iW, iIdx,
-    nUA, nUA1, nFA, nFA1, nH, shoulderWorld, L1, L2, scale) {
+function _applyOneArm(body, iS, iE, iW,
+    nUA, nUA1, nFA, nFA1, shoulderWorld, L1, L2, scale) {
   if (L1 < 1e-6 || L2 < 1e-6) return;
 
   lmWorldOffset(body[iW], body[iS], scale, shoulderWorld, _ikWrist);
   lmWorldOffset(body[iE], body[iS], scale, shoulderWorld, _ikEHint);
 
-  // El vector hacia el codo hint es el vector de polo
+  // Vector de polo = dirección del codo desde el hombro.
+  // Problema: cuando la mano está por encima del hombro, el vector codo→hombro
+  // y el vector hombro→muñeca son casi paralelos → después de proyectar, el polo
+  // residual es ≈0 y el solver pone el codo en dirección arbitraria.
+  // Fix: añadir un componente descendente fuerte para que el codo siempre cuelgue
+  // por debajo de la línea hombro-muñeca (posición anatómica en LSC),
+  // más un pequeño bias frontal para compensar la subestimación de z normalizado.
   _ikPole.subVectors(_ikEHint, shoulderWorld);
+  _ikPole.y -= (L1 + L2) * 0.35; // codo hacia abajo (anatómico)
+  _ikPole.z += (L1 + L2) * 0.10; // leve bias frontal
 
   solveIKElbow(shoulderWorld, _ikWrist, _ikPole, L1, L2);
   // _ikElbow ← posición del codo resuelto por IK
@@ -268,25 +276,36 @@ function _applyOneArm(body, iS, iE, iW, iIdx,
 
   const bUA  = state.bones.get(nUA),  bUA1 = state.bones.get(nUA1);
   const bFA  = state.bones.get(nFA),  bFA1 = state.bones.get(nFA1);
-  const bH   = state.bones.get(nH);
 
   if (bUA)  rotateBone(bUA,  dirUA);
   if (bUA1) rotateBone(bUA1, dirUA);
   if (bFA)  rotateBone(bFA,  dirFA);
   if (bFA1) rotateBone(bFA1, dirFA);
-  if (bH)   rotateBone(bH,   lmDir(body[iW], body[iIdx]));
+  // La orientación de DEF-handL/R (incluye roll de muñeca) se aplica en applyFrame
+  // usando applyHandOrientation con los landmarks completos de la mano.
 }
 
 // ── Retargeting ───────────────────────────────────────────────────────────────
 
 // Aplica la rotación de un hueso para que apunte de lmA → lmB
-const _dQ  = new THREE.Quaternion();
-const _tWQ = new THREE.Quaternion();
-const _pWQ = new THREE.Quaternion();
-const _tLQ = new THREE.Quaternion(); // quaternion local objetivo (scratch)
-const _dir = new THREE.Vector3();
+const _dQ      = new THREE.Quaternion();
+const _tWQ     = new THREE.Quaternion();
+const _pWQ     = new THREE.Quaternion();
+const _tLQ     = new THREE.Quaternion();
+const _dir     = new THREE.Vector3();
+const _xAxis   = new THREE.Vector3(1, 0, 0);
+const _faceDir = new THREE.Vector3();
 
-function rotateBone(bone, targetDir) {
+// Scratch para orientación completa de la muñeca (incluye roll)
+const _hUp   = new THREE.Vector3();
+const _hIdxV = new THREE.Vector3();
+const _hPnkV = new THREE.Vector3();
+const _hNorm = new THREE.Vector3();
+const _hSide = new THREE.Vector3();
+const _hMat  = new THREE.Matrix4();
+const _hQ    = new THREE.Quaternion();
+
+function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
   const restDir    = state.boneRestDir.get(bone.name);
   const restWorldQ = state.boneRestWorldQ.get(bone.name);
   if (!restDir || !restWorldQ) return;
@@ -304,10 +323,121 @@ function rotateBone(bone, targetDir) {
   } else {
     _tLQ.copy(_tWQ);
   }
-  // Slerp desde la pose actual hacia el objetivo — suaviza el ruido de landmarks.
-  // alpha=1 → snap instantáneo; alpha<1 → interpolación progresiva.
-  bone.quaternion.slerp(_tLQ, state.smoothAlpha);
+  bone.quaternion.slerp(_tLQ, alpha);
   bone.updateMatrixWorld(true);
+}
+
+// Orienta la muñeca con roll completo (giro alrededor del eje del dedo).
+//
+// Dos pasos:
+//   1. rotateBone alinea el eje Y del hueso al dedo medio (como siempre, con slerp).
+//   2. Se calcula la normal de la palma desde los landmarks y se hace girar
+//      el hueso alrededor del eje Y hasta que su eje Z local coincida con esa normal.
+//      Esto captura el roll (palma arriba/abajo/hacia cámara/etc.).
+//
+// normalSign: +1 si cross(idx,pnk) apunta hacia la palma en world-space (mano izquierda),
+//             -1 si apunta en sentido contrario (mano derecha — los dedos aparecen
+//             en orden inverso en la imagen porque la mano está espejada).
+function applyHandOrientation(bone, rawLms, normalSign) {
+  const w = rawLms[0];
+
+  // ── Paso 1: alinear eje Y del hueso al dedo medio ───────────────────────
+  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z));
+  if (_hUp.lengthSq() < 1e-8) return;
+  _hUp.normalize();
+  rotateBone(bone, _hUp); // slerp incluido
+
+  // ── Paso 2: roll — girar el hueso para que su Z apunte a la normal de palma ──
+  _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z));
+  _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z));
+  _hNorm.crossVectors(_hIdxV, _hPnkV).multiplyScalar(normalSign);
+  if (_hNorm.lengthSq() < 1e-8) return;
+  _hNorm.normalize();
+  // Proyectar la normal para que sea perpendicular al eje Y (dedo)
+  _hNorm.addScaledVector(_hUp, -_hNorm.dot(_hUp)).normalize();
+  if (_hNorm.lengthSq() < 1e-8) return;
+
+  // Quaternion world actual del hueso (post paso 1)
+  bone.getWorldQuaternion(_hQ);
+
+  // Eje Z actual del hueso en world space, proyectado ⊥ al eje Y
+  _hSide.set(0, 0, 1).applyQuaternion(_hQ);
+  _hSide.addScaledVector(_hUp, -_hSide.dot(_hUp)).normalize();
+  if (_hSide.lengthSq() < 1e-8) return;
+
+  // Delta de roll: rotar el Z actual hacia la normal objetivo
+  _dQ.setFromUnitVectors(_hSide, _hNorm);
+
+  // Nuevo quaternion world = roll_delta * current_world_Q
+  _tWQ.multiplyQuaternions(_dQ, _hQ);
+
+  // Convertir a local respecto al padre
+  if (bone.parent) {
+    bone.parent.getWorldQuaternion(_pWQ);
+    _tLQ.multiplyQuaternions(_pWQ.invert(), _tWQ);
+  } else {
+    _tLQ.copy(_tWQ);
+  }
+  bone.quaternion.copy(_tLQ); // roll snap (Y ya fue suavizado en paso 1)
+  bone.updateMatrixWorld(true);
+}
+
+// ── Animación facial ─────────────────────────────────────────────────────────
+// face = dict {lm_index_str: {x,y,z}} con los landmarks clave de FaceMesh 468.
+// Mapeo:
+//   lm13/14   → apertura de boca  → DEF-jaw_master (rotación X)
+//   lm107/336 → altura de cejas   → DEF-browTL / DEF-browTR (rotación X)
+// Referencia: IOD (distancia interocular lm159.x↔lm386.x) normaliza las medidas.
+const FACE_REF_BROW   = 0.47; // browHt / IOD en neutro (mediana empírica LSC50)
+const FACE_BROW_SCALE = 6.0;  // factor browHt-delta → radianes (duplicado para mayor visibilidad)
+const FACE_JAW_MAX    = 1.2;  // radianes máx apertura mandíbula (~70°)
+
+// Los huesos faciales usan alpha=1 (snap instantáneo) para no quedarse rezagados
+// con respecto al slider de suavizado — el suavizado es para las extremidades.
+const FACE_ALPHA = 1.0;
+
+function applyFace(face) {
+  // ─── Mandíbula (boca abierta) ───────────────────────────────────────────
+  const lipT = face["13"], lipB = face["14"];
+  const cL   = face["78"], cR   = face["308"];
+  if (lipT && lipB && cL && cR) {
+    const mouthW  = Math.abs(cR.x - cL.x);
+    const jawFactor = mouthW > 1e-4
+      ? THREE.MathUtils.clamp((lipB.y - lipT.y) / mouthW, 0, 0.6)
+      : 0;
+    const bJaw = state.bones.get("DEF-jaw_master");
+    if (bJaw) {
+      const rd = state.boneRestDir.get("DEF-jaw_master");
+      if (rd) {
+        _faceDir.copy(rd).applyAxisAngle(_xAxis, jawFactor * FACE_JAW_MAX);
+        rotateBone(bJaw, _faceDir, FACE_ALPHA);
+      }
+    }
+  }
+
+  // ─── Cejas ──────────────────────────────────────────────────────────────
+  const lidTL = face["159"], lidTR = face["386"];
+  const browL  = face["107"], browR  = face["336"];
+  if (lidTL && lidTR && browL && browR) {
+    const iod = Math.abs(lidTR.x - lidTL.x);
+    if (iod > 0.01) {
+      const browHtL = (lidTL.y - browL.y) / iod;
+      const browHtR = (lidTR.y - browR.y) / iod;
+      const raiseL  = THREE.MathUtils.clamp((browHtL - FACE_REF_BROW) * FACE_BROW_SCALE, -0.6, 0.6);
+      const raiseR  = THREE.MathUtils.clamp((browHtR - FACE_REF_BROW) * FACE_BROW_SCALE, -0.6, 0.6);
+
+      const bBL = state.bones.get("DEF-browTL");
+      if (bBL) {
+        const rd = state.boneRestDir.get("DEF-browTL");
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseL); rotateBone(bBL, _faceDir, FACE_ALPHA); }
+      }
+      const bBR = state.bones.get("DEF-browTR");
+      if (bBR) {
+        const rd = state.boneRestDir.get("DEF-browTR");
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bBR, _faceDir, FACE_ALPHA); }
+      }
+    }
+  }
 }
 
 function applyFrame(frameData) {
@@ -315,11 +445,23 @@ function applyFrame(frameData) {
   if (frameData.body) {
     applyArmIK(frameData.body);
   }
+  // ── Cara: mandíbula y cejas ───────────────────────────────────────────────
+  if (frameData.face) {
+    applyFace(frameData.face);
+  }
 
-  // ── Dedos: hand landmarks ─────────────────────────────────────────────────
+  // ── Muñecas y dedos: hand landmarks ──────────────────────────────────────
   if (!frameData.hands?.length) return;
   const handsMap = {};
   for (const h of frameData.hands) handsMap[h.hand] = h.landmarks;
+
+  // Orientación completa de la muñeca (incluye roll) antes de animar dedos
+  const bHL = state.bones.get("DEF-handL");
+  const bHR = state.bones.get("DEF-handR");
+  // normalSign +1 para mano izquierda (cross(idx,pnk) apunta hacia la palma),
+  // -1 para mano derecha (los dedos aparecen en orden inverso → normal al revés).
+  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
+  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1);
 
   for (const [boneName, lmStart, lmEnd] of BONE_MAP) {
     const bone = state.bones.get(boneName);

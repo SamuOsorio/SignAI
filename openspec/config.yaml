@@ -1,0 +1,109 @@
+schema: spec-driven
+
+context: |
+  ## SignAI — Contexto técnico del proyecto
+
+  **Objetivo**: Traducción de español hablado → Lengua de Señas Colombiana (LSC) mediante
+  un avatar 3D animado en tiempo real. Pipeline actual: landmarks LSC50 → avatar web Three.js.
+  Migración futura a Flutter/Filament.
+
+  ### Stack
+  - Frontend 3D: Three.js r169 (ES modules, CDN jsDelivr)
+  - Servidor: Flask Python, puerto 5000
+  - Rig: Rigify (Blender 5.2) exportado como GLB
+  - Landmark capture: MediaPipe Tasks API
+  - Dataset: LSC50 (50 señas, 5 voluntarios, 4 reps = 1000 videos)
+
+  ### Dataset LSC50 — formato de IDs y archivos
+  ID: `SSSS_VVVV_RRRR` = seña_voluntario_repetición (NO seña_rep_ángulo)
+  - 50 señas (0000–0049), 5 voluntarios (0000–0004), 4 repeticiones (0000–0003)
+  - 4 tipos de video: COLOR_FACE (50fps), COLOR_BODY (24fps), GRAY_DEPTH, GRAY_IR
+  - Solo tenemos COLOR_BODY en VIDEOS.zip
+  - Landmarks ya extraídos en data/LANDMARKS/ (4000 CSVs × 4 tipos)
+
+  ### Formato CSV de landmarks (crítico para señas propias)
+  Todos los CSVs tienen header: `landmark_0_x, landmark_0_y, landmark_0_z, landmark_1_x, ...`
+  - BODY: 33 landmarks MediaPipe Pose (x,y norm 0-1, y=0 arriba, z relativo pequeño)
+  - HANDS (LEFT/RIGHT): 21 landmarks MediaPipe Hands (x,y norm 0-1, z profundidad relativa a muñeca)
+  - FACE: 468 landmarks MediaPipe FaceMesh (x,y norm 0-1, z profundidad relativa a cabeza)
+  Videos propios deben producir CSVs con exactamente este mismo formato y modelos MediaPipe.
+
+  ### FPS por fuente de landmarks (¡importante para sincronización!)
+  - BODY + HANDS: 24fps → ~59 frames típicos
+  - FACE: 50fps → ~163 frames típicos (ratio ~2.9× respecto a body)
+  Bug actual: server.py asigna face[i] → body_frame[i] sin corregir por fps diferente.
+  Fix correcto: face_idx = round(i * len(face_frames) / len(body_frames))
+
+  ### Avatar GLB — estructura del rig (app/static/avatar.glb)
+  - 3 meshes: female_v006lowresUV (12010 verts, sin textura), male_v008Eyes ×2 (ojos skinned)
+  - 2 skins: rig (918 joints DEF-*), metarig (174 joints)
+  - Rig hecho con Rigify completo en Blender (PruebaBlender2.blend)
+  - Mesh actual NO tiene textura ni material → aspecto de maniquí gris
+  - Plan: reemplazar mesh por versión con textura conservando el rig Rigify
+
+  ### Nombres de huesos — CRÍTICO (todos con puntos en cara, sin puntos en dedos)
+  Dedos: thumb01L, f_index01L, f_middle01L, f_ring01L, f_pinky01L (sin puntos, sin DEF-)
+  Brazos: DEF-upper_armL, DEF-upper_armL001, DEF-forearmL, DEF-forearmL001, DEF-handL (ídem R)
+  Cara (TODOS con puntos):
+    Cejas:    DEF-brow.T.L / DEF-brow.T.R  (superior) — Bug actual: código usa DEF-browTL/TR ← INCORRECTO
+              DEF-brow.B.L / DEF-brow.B.R  (inferior)
+    Párpados: DEF-lid.T.L / DEF-lid.T.R    (superior)
+              DEF-lid.B.L / DEF-lid.B.R    (inferior)
+    Labios:   DEF-lip.T.L / DEF-lip.T.R / DEF-lip.B.L / DEF-lip.B.R
+    Mandíbula: DEF-jaw_master               (sin puntos — correcto en código actual)
+    Ojos:     DEF-eye.L / DEF-eye.R / DEF-eye_iris.L / DEF-eye_iris.R
+
+  ### Problemas conocidos del rig
+  - DEF-brow.T.R tiene solo 4 vértices pesados vs 32 en DEF-brow.T.L → ceja derecha casi estática
+  - Vertex weights asignados por Rigify automáticamente, corrección pendiente en Blender
+
+  ### Expresiones faciales requeridas (prioridad del proyecto)
+  1. Duda: cejas asimétricas (DEF-brow.T.L + DEF-brow.T.R)
+  2. Felicidad: cejas arriba + comisuras boca (DEF-brow + DEF-lip.T.L/R)
+  3. Pregunta: cejas arriba + boca abierta (DEF-brow + DEF-jaw_master)
+  Párpados y dirección de mirada: no son prioridad en esta fase.
+
+  ### Landmarks de cara disponibles para expresiones (FACE_KEY_LMS en server.py)
+  lm 13,14 = labio sup/inf (mandíbula)
+  lm 78,308 = comisura izq/der
+  lm 70,107,55 = ceja izq (exterior, centro, interior)
+  lm 300,336,285 = ceja der
+  lm 159,145 = párpado izq sup/inf
+  lm 386,374 = párpado der sup/inf
+  lm 1,168 = nariz (referencia estable)
+
+  ### Workflow planificado (del diagrama del equipo)
+  1. Fuentes: LSC50 landmarks + videos propios → Mediapipe → CSV mismo formato
+  2. Visualización web: verificar brazo completo, hombro, muñecas, manos
+  3. Prioridad #1: Manos y muñeca, Brazos completos, Cabeza
+  4. Prioridad #2: Cara — expresiones duda/felicidad/pregunta
+  5. Exportar .glb → Flutter/Filament (compatibilidad pendiente de verificar)
+
+  ### IMU data (data/IMU/) — disponible pero no usado
+  5 voluntarios, 7 sensores XSENSE XDOT. Archivos .mot de OpenSim tienen ángulos en grados:
+  arm_flex/add/rot, elbow_flex, pro_sup (pronación), wrist_flex, wrist_dev.
+  Requiere Timestamps.xlsx para mapear cada seña al segmento temporal del .mot.
+
+rules:
+  proposal:
+    - Incluir sección de impacto en el pipeline de animación
+    - Considerar compatibilidad con Three.js Y Filament (mobile)
+    - Mencionar qué landmarks de LSC50 se usan
+  tasks:
+    - Tareas de código separadas de tareas de Blender/assets
+    - Indicar si requiere re-exportar el GLB
+    - Verificar nombres de huesos con puntos (cara) vs sin puntos (dedos)
+  spec:
+    - Documentar el formato CSV exacto si se describe captura de landmarks
+    - Indicar la fuente (LSC50 vs video propio) para cada dato
+
+operations:
+  apply:
+    guidance:
+      - Siempre verificar nombres de huesos en browser console con [..._signAI.bones.keys()]
+      - Usar FACE_ALPHA = 1.0 para huesos faciales (no slerp)
+      - No usar removeFromParent() en objetos WGT-*, solo obj.visible = false
+      - Los huesos de cara usan puntos (DEF-brow.T.L), los de dedos no (thumb01L)
+  archive:
+    guidance:
+      - Actualizar el estado actual del proyecto en config.yaml context si cambió algo relevante
