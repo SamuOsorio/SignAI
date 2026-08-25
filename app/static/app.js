@@ -391,6 +391,8 @@ function applyHandOrientation(bone, rawLms, normalSign) {
 const FACE_REF_BROW   = 0.47; // browHt / IOD en neutro (mediana empírica LSC50)
 const FACE_BROW_SCALE = 6.0;  // factor browHt-delta → radianes (duplicado para mayor visibilidad)
 const FACE_JAW_MAX    = 1.2;  // radianes máx apertura mandíbula (~70°)
+const FACE_LIP_SCALE  = 4.0;  // factor corner-delta / mouthW → radianes
+const FACE_LIP_MAX    = 0.5;  // radianes máx comisura
 
 // Los huesos faciales usan alpha=1 (snap instantáneo) para no quedarse rezagados
 // con respecto al slider de suavizado — el suavizado es para las extremidades.
@@ -435,6 +437,29 @@ function applyFace(face) {
       if (bBR) {
         const rd = state.boneRestDir.get("DEF-browTR");
         if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bBR, _faceDir, FACE_ALPHA); }
+      }
+    }
+  }
+
+  // ─── Comisuras de boca (labios) ─────────────────────────────────────────
+  // cL (lm78) y cR (lm308) ya declarados; mouthCY = centro vertical de la boca.
+  // En MediaPipe y aumenta hacia abajo: si cL.y < mouthCY → comisura sube → sonrisa.
+  if (lipT && lipB && cL && cR) {
+    const mouthW  = Math.abs(cR.x - cL.x);
+    if (mouthW > 1e-4) {
+      const mouthCY = (lipT.y + lipB.y) * 0.5;
+      const raiseL  = THREE.MathUtils.clamp((mouthCY - cL.y) / mouthW * FACE_LIP_SCALE, -FACE_LIP_MAX, FACE_LIP_MAX);
+      const raiseR  = THREE.MathUtils.clamp((mouthCY - cR.y) / mouthW * FACE_LIP_SCALE, -FACE_LIP_MAX, FACE_LIP_MAX);
+
+      const bLL = state.bones.get("DEF-lipTL");
+      if (bLL) {
+        const rd = state.boneRestDir.get("DEF-lipTL");
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseL); rotateBone(bLL, _faceDir, FACE_ALPHA); }
+      }
+      const bLR = state.bones.get("DEF-lipTR");
+      if (bLR) {
+        const rd = state.boneRestDir.get("DEF-lipTR");
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bLR, _faceDir, FACE_ALPHA); }
       }
     }
   }

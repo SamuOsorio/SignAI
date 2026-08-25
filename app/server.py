@@ -124,7 +124,11 @@ def load_sign_landmarks(sign_id: str) -> dict:
         frame = {"hands": hands}
         if i < len(body_frames):
             frame["body"] = body_frames[i]
-        if i < len(face_frames):
+        if face_frames and body_frames:
+            face_idx = round(i * len(face_frames) / len(body_frames))
+            if face_idx < len(face_frames):
+                frame["face"] = face_frames[face_idx]
+        elif i < len(face_frames):
             frame["face"] = face_frames[i]
         frames.append(frame)
 

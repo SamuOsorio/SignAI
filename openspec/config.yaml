@@ -31,8 +31,7 @@ context: |
   ### FPS por fuente de landmarks (¡importante para sincronización!)
   - BODY + HANDS: 24fps → ~59 frames típicos
   - FACE: 50fps → ~163 frames típicos (ratio ~2.9× respecto a body)
-  Bug actual: server.py asigna face[i] → body_frame[i] sin corregir por fps diferente.
-  Fix correcto: face_idx = round(i * len(face_frames) / len(body_frames))
+  Sincronización corregida en server.py: face_idx = round(i * len(face_frames) / len(body_frames))
 
   ### Avatar GLB — estructura del rig (app/static/avatar.glb)
   - 3 meshes: female_v006lowresUV (12010 verts, sin textura), male_v008Eyes ×2 (ojos skinned)
@@ -41,26 +40,31 @@ context: |
   - Mesh actual NO tiene textura ni material → aspecto de maniquí gris
   - Plan: reemplazar mesh por versión con textura conservando el rig Rigify
 
-  ### Nombres de huesos — CRÍTICO (todos con puntos en cara, sin puntos en dedos)
-  Dedos: thumb01L, f_index01L, f_middle01L, f_ring01L, f_pinky01L (sin puntos, sin DEF-)
+  ### Nombres de huesos — CRÍTICO (verificado en GLB con [..._signAI.bones.keys()])
+  NINGÚN hueso de cara usa puntos en este GLB. La convención real es camelCase sin separadores.
+  Dedos: thumb01L, f_index01L, f_middle01L, f_ring01L, f_pinky01L (sin DEF-)
   Brazos: DEF-upper_armL, DEF-upper_armL001, DEF-forearmL, DEF-forearmL001, DEF-handL (ídem R)
-  Cara (TODOS con puntos):
-    Cejas:    DEF-brow.T.L / DEF-brow.T.R  (superior) — Bug actual: código usa DEF-browTL/TR ← INCORRECTO
-              DEF-brow.B.L / DEF-brow.B.R  (inferior)
-    Párpados: DEF-lid.T.L / DEF-lid.T.R    (superior)
-              DEF-lid.B.L / DEF-lid.B.R    (inferior)
-    Labios:   DEF-lip.T.L / DEF-lip.T.R / DEF-lip.B.L / DEF-lip.B.R
-    Mandíbula: DEF-jaw_master               (sin puntos — correcto en código actual)
-    Ojos:     DEF-eye.L / DEF-eye.R / DEF-eye_iris.L / DEF-eye_iris.R
+  Cara (SIN puntos — formato DEF-{nombre}{Lado}{número}):
+    Cejas sup: DEF-browTL / DEF-browTL001 / DEF-browTL002 / DEF-browTL003  (Left)
+               DEF-browTR / DEF-browTR001 / DEF-browTR002 / DEF-browTR003  (Right)
+    Cejas inf: DEF-browBL … DEF-browBL004 / DEF-browBR … DEF-browBR004
+    Párpados:  DEF-lidTL / DEF-lidTL001–003 / DEF-lidTR / DEF-lidTR001–003  (superior)
+               DEF-lidBL / DEF-lidBL001–003 / DEF-lidBR / DEF-lidBR001–003  (inferior)
+    Labios:    DEF-lipTL / DEF-lipTL001 / DEF-lipTR / DEF-lipTR001  (superior)
+               DEF-lipBL / DEF-lipBL001 / DEF-lipBR / DEF-lipBR001  (inferior)
+    Mandíbula: DEF-jaw_master  (con guión bajo — correcto en código)
+               DEF-jaw / DEF-jawL / DEF-jawL001 / DEF-jawR / DEF-jawR001
+    Ojos:      DEF-eyeL / DEF-eyeR / DEF-eye_irisL / DEF-eye_irisR
+               DEF-eye_masterL / DEF-eye_masterR
 
   ### Problemas conocidos del rig
-  - DEF-brow.T.R tiene solo 4 vértices pesados vs 32 en DEF-brow.T.L → ceja derecha casi estática
-  - Vertex weights asignados por Rigify automáticamente, corrección pendiente en Blender
+  - DEF-browTR tiene solo 4 vértices pesados vs 32 en DEF-browTL → ceja derecha casi estática
+  - Vertex weights asignados por Rigify automáticamente, corrección pendiente en Blender (tarea 2.3)
 
   ### Expresiones faciales requeridas (prioridad del proyecto)
-  1. Duda: cejas asimétricas (DEF-brow.T.L + DEF-brow.T.R)
-  2. Felicidad: cejas arriba + comisuras boca (DEF-brow + DEF-lip.T.L/R)
-  3. Pregunta: cejas arriba + boca abierta (DEF-brow + DEF-jaw_master)
+  1. Duda: cejas asimétricas (DEF-browTL + DEF-browTR)
+  2. Felicidad: cejas arriba + comisuras boca (DEF-browTL/TR + DEF-lipTL/TR)
+  3. Pregunta: cejas arriba + boca abierta (DEF-browTL/TR + DEF-jaw_master)
   Párpados y dirección de mirada: no son prioridad en esta fase.
 
   ### Landmarks de cara disponibles para expresiones (FACE_KEY_LMS en server.py)
@@ -92,7 +96,7 @@ rules:
   tasks:
     - Tareas de código separadas de tareas de Blender/assets
     - Indicar si requiere re-exportar el GLB
-    - Verificar nombres de huesos con puntos (cara) vs sin puntos (dedos)
+    - "Verificar nombres de huesos con [..._signAI.bones.keys()] — cara: camelCase sin puntos (DEF-browTL), dedos: sin DEF- (thumb01L)"
   spec:
     - Documentar el formato CSV exacto si se describe captura de landmarks
     - Indicar la fuente (LSC50 vs video propio) para cada dato
@@ -103,7 +107,7 @@ operations:
       - Siempre verificar nombres de huesos en browser console con [..._signAI.bones.keys()]
       - Usar FACE_ALPHA = 1.0 para huesos faciales (no slerp)
       - No usar removeFromParent() en objetos WGT-*, solo obj.visible = false
-      - Los huesos de cara usan puntos (DEF-brow.T.L), los de dedos no (thumb01L)
+      - Los huesos de cara NO usan puntos en este GLB: DEF-browTL, DEF-lipTL, DEF-lidTL (camelCase, sin separadores)
   archive:
     guidance:
       - Actualizar el estado actual del proyecto en config.yaml context si cambió algo relevante
