@@ -28,12 +28,14 @@ function lmDir(a, b) {
   return new THREE.Vector3(b.x - a.x, -(b.y - a.y), -(b.z - a.z));
 }
 
-// Para dedos: resta la muñeca antes de calcular la dirección
+// Para dedos: resta la muñeca antes de calcular la dirección.
+// Z se suprime (×0) porque los valores de profundidad de MediaPipe Hands son ruidosos
+// en video monocular frontal y causan torsiones laterales en las falanges.
 function mpToThree(lm, wrist) {
   return new THREE.Vector3(
      (lm.x - wrist.x),
     -(lm.y - wrist.y),
-    -(lm.z - wrist.z),
+    0,
   );
 }
 
@@ -50,8 +52,12 @@ const state = {
   lastTime: null,
   animHandle: null,
   // Fracción [0,1] que avanza hacia el quaternion objetivo cada tick de rAF.
-  // 1.0 = sin suavizado (snap instantáneo). 0.1 = muy suavizado (lento).
-  smoothAlpha: 0.7,
+  // 0.12 ≈ convergencia en ~6 frames a 60fps (~100ms), buen balance suavidad/lag.
+  smoothAlpha: 0.12,
+  // Normal de palma por mano, actualizada cada frame en applyHandOrientation.
+  // Usada por el loop de dedos para proyectar direcciones sobre el plano de la palma.
+  palmNormalL: new THREE.Vector3(0, 0, 1),
+  palmNormalR: new THREE.Vector3(0, 0, 1),
   // Posiciones world de hombros y longitudes de segmentos de brazo en rest pose.
   // Se calcula una vez al cargar el GLB y se usa para el IK de brazos.
   armRest: {
@@ -378,8 +384,12 @@ function applyHandOrientation(bone, rawLms, normalSign) {
   } else {
     _tLQ.copy(_tWQ);
   }
-  bone.quaternion.copy(_tLQ); // roll snap (Y ya fue suavizado en paso 1)
+  bone.quaternion.slerp(_tLQ, state.smoothAlpha); // roll suavizado igual que Y
   bone.updateMatrixWorld(true);
+
+  // Guardar normal de palma para que el loop de dedos proyecte sobre este plano
+  if (bone.name === "DEF-handL") state.palmNormalL.copy(_hNorm);
+  else                           state.palmNormalR.copy(_hNorm);
 }
 
 // ── Animación facial ─────────────────────────────────────────────────────────
@@ -492,13 +502,19 @@ function applyFrame(frameData) {
     const bone = state.bones.get(boneName);
     if (!bone) continue;
 
-    const side   = boneName.endsWith("L") ? "Left" : "Right";
-    const rawLms = handsMap[side];
+    const side      = boneName.endsWith("L") ? "Left" : "Right";
+    const rawLms    = handsMap[side];
     if (!rawLms) continue;
 
-    const wrist = rawLms[0];
-    rotateBone(bone,
-      mpToThree(rawLms[lmEnd], wrist).sub(mpToThree(rawLms[lmStart], wrist)));
+    const palmNorm  = side === "Left" ? state.palmNormalL : state.palmNormalR;
+    const wrist     = rawLms[0];
+    const dir = mpToThree(rawLms[lmEnd], wrist).sub(mpToThree(rawLms[lmStart], wrist));
+
+    // Proyectar sobre el plano de la palma: elimina la componente perpendicular
+    // a la palma que en video monocular es ruido puro.
+    dir.addScaledVector(palmNorm, -dir.dot(palmNorm));
+
+    rotateBone(bone, dir);
   }
 }
 
@@ -609,14 +625,6 @@ fetch("/api/signs").then(r => r.json()).then(signs => {
 
 select.addEventListener("change", () => { if (select.value) loadSign(select.value); });
 
-// ── Control de suavizado ──────────────────────────────────────────────────────
-const smoothSlider = document.getElementById("smooth-slider");
-const smoothValEl  = document.getElementById("smooth-val");
-smoothSlider.addEventListener("input", () => {
-  const pct = parseFloat(smoothSlider.value);
-  state.smoothAlpha = 1 - pct;
-  smoothValEl.textContent = `${Math.round(pct * 100)}%`;
-});
 
 // ── Utilidad ──────────────────────────────────────────────────────────────────
 function setStatus(msg, type) {

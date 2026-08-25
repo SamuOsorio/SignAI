@@ -134,7 +134,7 @@ def load_sign_landmarks(sign_id: str) -> dict:
 
     return {
         "stem":            sign_id,
-        "fps":             30,
+        "fps":             24,
         "total_frames":    n,
         "frames_with_hand": n,
         "detection_rate":  1.0,
