@@ -35,8 +35,8 @@ namespace SignAI
                 var t = Input.GetTouch(0);
                 if (t.phase == TouchPhase.Moved)
                 {
-                    _azimuth -= t.deltaPosition.x * orbitSpeed;
-                    _elevation += t.deltaPosition.y * orbitSpeed;
+                    _azimuth += t.deltaPosition.x * orbitSpeed;
+                    _elevation -= t.deltaPosition.y * orbitSpeed;
                     _elevation = Mathf.Clamp(_elevation, minElevation, maxElevation);
                 }
             }

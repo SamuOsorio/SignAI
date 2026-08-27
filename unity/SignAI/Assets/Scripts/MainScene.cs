@@ -8,7 +8,6 @@ namespace SignAI
         UIManager _ui;
         Rect _lastSafeArea;
         Rect _lastKbArea;
-        float _nextSafeAreaCheck;
 
         void Awake()
         {
@@ -42,10 +41,9 @@ namespace SignAI
 
         void Update()
         {
-            // ponytail: poll Screen.safeArea AND TouchScreenKeyboard.area every 200 ms — covers soft-keyboard
-            // open/close on devices where Screen.safeArea doesn't auto-update, plus gesture-nav reveal/hide.
-            if (Time.unscaledTime < _nextSafeAreaCheck) return;
-            _nextSafeAreaCheck = Time.unscaledTime + 0.2f;
+            // ponytail: poll Screen.safeArea AND TouchScreenKeyboard.area every frame — the keyboard
+            // moves fast on Android and a 200 ms tick left a visible lag. The two rects rarely change
+            // so the branch+work below is cheap when nothing's animating.
             var kb = TouchScreenKeyboard.area;
             if (Screen.safeArea != _lastSafeArea || kb != _lastKbArea)
             {

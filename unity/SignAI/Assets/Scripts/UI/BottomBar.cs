@@ -17,8 +17,13 @@ namespace SignAI.UI
         const float BAR_HEIGHT = 300f;
         const float ROW_HEIGHT = 105f;
         const float BTN_H = 75f;
-        const float MIN_BOTTOM_SAFE_PX = 48f;
-        const float ANIM_SMOOTH_TIME = 0.15f;
+        // ponytail: extra 10% above the 48px gesture-nav floor so the nav-bar never feels cramped.
+        // Only applies when the keyboard is closed — when kb is up, TouchScreenKeyboard.area wins via Mathf.Max
+        // and the floor is irrelevant, so no dead space appears between keyboard and buttons.
+        const float MIN_BOTTOM_SAFE_PX = 53f;
+        // ponytail: snappy follow — ~60ms catch-up so the bar tracks the keyboard without visible lag.
+        // Spec calls for correct basic behavior first; tighten if it still feels slow.
+        const float ANIM_SMOOTH_TIME = 0.06f;
 
         Canvas _canvas;
         float _targetOffset;
@@ -61,7 +66,7 @@ namespace SignAI.UI
             rowRt.sizeDelta = new Vector2(0, ROW_HEIGHT);
             rowRt.anchoredPosition = new Vector2(0, -15);
 
-            var inputGo = UIFactory.CreateTextInput(row.transform, "TextInput", "Escribe un mensaje...");
+            var inputGo = UIFactory.CreateTextInput(row.transform, "TextInput", "v" + Application.version);
             TextInput = inputGo.GetComponent<InputField>();
             var inputRt = UIFactory.GetRT(inputGo);
             inputRt.anchorMin = new Vector2(0, 0);
@@ -86,31 +91,35 @@ namespace SignAI.UI
             rowRt.sizeDelta = new Vector2(0, ROW_HEIGHT);
             rowRt.anchoredPosition = new Vector2(0, -127);
 
+            // Mic: 25% del ancho (margen simétrico 24 izq / 12 der)
             var micIcon = UIFactory.GetMicIcon();
             _micBtn = (micIcon != null
                 ? UIFactory.CreateIconButton(row.transform, "MicBtn", micIcon, Theme.BtnDefault, (int)BTN_H)
                 : UIFactory.CreateButton(row.transform, "MicBtn", "Mic", Theme.BtnDefault, Theme.TextPrimary, 36)
             ).GetComponent<Button>();
             var micRt = UIFactory.GetRT(_micBtn.gameObject);
-            micRt.anchorMin = new Vector2(0, 0.5f);
-            micRt.anchorMax = new Vector2(0, 0.5f);
-            micRt.pivot = new Vector2(0, 0.5f);
-            micRt.sizeDelta = new Vector2(BTN_H, BTN_H);
-            micRt.anchoredPosition = new Vector2(24, 0);
+            micRt.anchorMin = new Vector2(0f, 0.5f);
+            micRt.anchorMax = new Vector2(0.25f, 0.5f);
+            micRt.pivot = new Vector2(0.5f, 0.5f);
+            micRt.sizeDelta = new Vector2(0f, BTN_H);
+            micRt.offsetMin = new Vector2(24f, -BTN_H / 2f);
+            micRt.offsetMax = new Vector2(-12f, BTN_H / 2f);
 
             ApplyButtonStyle(_micBtn);
             _micBtn.onClick.AddListener(() => OnMicClicked?.Invoke());
 
+            // Enviar: 75% del ancho (margen simétrico 12 izq / 24 der)
             _sendWideBtn = UIFactory.CreateButton(
                 row.transform, "SendWideBtn", "Enviar",
                 Theme.BtnPrimary, Theme.TextWhite, 40
             ).GetComponent<Button>();
             var wideRt = UIFactory.GetRT(_sendWideBtn.gameObject);
-            wideRt.anchorMin = new Vector2(0, 0.5f);
-            wideRt.anchorMax = new Vector2(1, 0.5f);
-            wideRt.pivot = new Vector2(0, 0.5f);
-            wideRt.sizeDelta = new Vector2(-144, BTN_H);
-            wideRt.anchoredPosition = new Vector2(132, 0);
+            wideRt.anchorMin = new Vector2(0.25f, 0.5f);
+            wideRt.anchorMax = new Vector2(1f, 0.5f);
+            wideRt.pivot = new Vector2(0.5f, 0.5f);
+            wideRt.sizeDelta = new Vector2(0f, BTN_H);
+            wideRt.offsetMin = new Vector2(12f, -BTN_H / 2f);
+            wideRt.offsetMax = new Vector2(-24f, BTN_H / 2f);
 
             ApplyButtonStyle(_sendWideBtn);
             _sendWideBtn.onClick.AddListener(() => OnSendWideClicked?.Invoke());
@@ -131,14 +140,21 @@ namespace SignAI.UI
         {
             // ponytail: Screen.safeArea is in physical px; RectTransform offsets are in Canvas UI units.
             // Combine: safeArea, hardcoded floor (gesture nav), and TouchScreenKeyboard.area (keyboard).
-            // The bar translates up so its bottom lands on whichever pushes it the highest.
+            float scale = _canvas != null && _canvas.scaleFactor > 0f ? _canvas.scaleFactor : 1f;
             float safeAreaBottom = Mathf.Max(Screen.safeArea.yMin, MIN_BOTTOM_SAFE_PX);
             var kb = TouchScreenKeyboard.area;
-            float kbBottom = (kb.height > 0f) ? Mathf.Max(0f, Screen.height - kb.y) : 0f;
-            float physicalBottom = Mathf.Max(safeAreaBottom, kbBottom);
-            if (_canvas == null) return physicalBottom;
-            float scale = _canvas.scaleFactor;
-            return scale > 0f ? physicalBottom / scale : physicalBottom;
+            float kbHeightPx = kb.height; // physical px, top-origin
+            if (kbHeightPx > 0f)
+            {
+                // ponytail: when the keyboard is up, align the bottom of the BUTTONS (not the bottom of the
+                // bar) with the keyboard top. The bar is BAR_HEIGHT tall and the buttons end
+                // (BAR_HEIGHT - 127 - 105) canvas units above its bottom edge — if we just translated the
+                // bar by the keyboard height, that internal dead space showed as a gap above the keyboard.
+                float deadSpacePx = (BAR_HEIGHT - 232f) * scale; // 232 = ROW anchored offset (127) + row height (105)
+                float kbOffsetPx = Mathf.Max(0f, kbHeightPx - deadSpacePx);
+                return kbOffsetPx / scale;
+            }
+            return safeAreaBottom / scale;
         }
 
         public void ApplySafeArea()
