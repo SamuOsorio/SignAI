@@ -45,10 +45,14 @@ unity/SignAI/.vscode/
 .gradle/
 .kotlin/
 build/
+bin/
 local.properties
 *.iml
 .idea/
 *.hprof
+
+# Unity temp
+unity/SignAI/Temp/
 
 # ---------- OS junk ----------
 .DS_Store
