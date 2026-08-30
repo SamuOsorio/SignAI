@@ -7,7 +7,6 @@ const FACE_BROW_SCALE = 6.0;
 const FACE_JAW_MAX    = 1.2;  // radianes máx apertura mandíbula (~70°)
 const FACE_LIP_SCALE  = 4.0;
 const FACE_LIP_MAX    = 0.5;
-const FACE_ALPHA      = 1.0;  // snap instantáneo — el suavizado es para extremidades
 
 const _xAxis   = new THREE.Vector3(1, 0, 0);
 const _faceDir = new THREE.Vector3();
@@ -27,7 +26,7 @@ export function applyFace(face) {
       const rd = state.boneRestDir.get("DEF-jaw_master");
       if (rd) {
         _faceDir.copy(rd).applyAxisAngle(_xAxis, jawFactor * FACE_JAW_MAX);
-        rotateBone(bJaw, _faceDir, FACE_ALPHA);
+        rotateBone(bJaw, _faceDir);
       }
     }
   }
@@ -46,12 +45,12 @@ export function applyFace(face) {
       const bBL = state.bones.get("DEF-browTL");
       if (bBL) {
         const rd = state.boneRestDir.get("DEF-browTL");
-        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseL); rotateBone(bBL, _faceDir, FACE_ALPHA); }
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseL); rotateBone(bBL, _faceDir); }
       }
       const bBR = state.bones.get("DEF-browTR");
       if (bBR) {
         const rd = state.boneRestDir.get("DEF-browTR");
-        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bBR, _faceDir, FACE_ALPHA); }
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bBR, _faceDir); }
       }
     }
   }
@@ -67,12 +66,12 @@ export function applyFace(face) {
       const bLL = state.bones.get("DEF-lipTL");
       if (bLL) {
         const rd = state.boneRestDir.get("DEF-lipTL");
-        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseL); rotateBone(bLL, _faceDir, FACE_ALPHA); }
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseL); rotateBone(bLL, _faceDir); }
       }
       const bLR = state.bones.get("DEF-lipTR");
       if (bLR) {
         const rd = state.boneRestDir.get("DEF-lipTR");
-        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bLR, _faceDir, FACE_ALPHA); }
+        if (rd) { _faceDir.copy(rd).applyAxisAngle(_xAxis, -raiseR); rotateBone(bLR, _faceDir); }
       }
     }
   }

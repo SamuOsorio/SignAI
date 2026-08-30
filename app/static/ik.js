@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { state } from "./state.js";
-import { rotateBone } from "./hands.js";
+import { rotateBone, SPRING_PARAMS } from "./hands.js";
 
 // Distancia wrist-wrist (coords normalizadas 0-1) por debajo de la cual se considera
 // que las manos están en cruce. En ese caso se ignoran los landmarks de Hands

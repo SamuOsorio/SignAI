@@ -2,7 +2,7 @@ import { state } from "./state.js";
 import { applyArmIK, CROSS_HAND_THRESHOLD } from "./ik.js";
 import { applyFace } from "./face.js";
 import { filterHandLandmarks, isHandDegenerate } from "./filters.js";
-import { clampHandLandmarks, applyFingers } from "./hands.js";
+import { clampHandLandmarks, applyFingers, initSprings } from "./hands.js";
 
 const video = document.getElementById("video");
 
@@ -42,7 +42,7 @@ export function applyFrame(frameData, dt = 1 / state.fps) {
     if (handsMap[side]) handsMap[side] = clampHandLandmarks(handsMap[side]);
   }
 
-  applyFingers(handsMap);
+  applyFingers(handsMap, dt);
 }
 
 export function resetPose() {
@@ -92,5 +92,6 @@ export function resetAnim() {
   pauseAnim();
   state.frameIdx = 0;
   video.currentTime = 0;
+  initSprings();
   resetPose();
 }

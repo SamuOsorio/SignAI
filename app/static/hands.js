@@ -116,6 +116,88 @@ export function clampHandLandmarks(lms) {
   return out;
 }
 
+// ── Spring-damper por hueso ───────────────────────────────────────────────────
+// Reemplaza el lerp/slerp fijo por un resorte críticamente amortiguado.
+// Cada hueso tiene su propia velocidad angular, lo que produce aceleración
+// natural al inicio y asentamiento suave al llegar al target.
+//
+// Parámetros:
+//   stiffness  — qué tan fuerte es el resorte (Hz²·4π²). Más alto = más rápido.
+//   damping    — amortiguación. √(stiffness) = crítica (sin rebote).
+//                Menor que crítica → rebota. Mayor → más lento sin rebote.
+//
+// Valores empíricos:
+//   dedos  : stiffness=80, damping=18  → converge en ~3 frames a 60fps, leve overshoot
+//   muñeca : stiffness=60, damping=15  → un poco más suave que los dedos
+//   cuerpo : stiffness=40, damping=12  → brazos y resto del cuerpo
+export const SPRING_PARAMS = {
+  finger: { stiffness: 80, damping: 18 },
+  wrist:  { stiffness: 60, damping: 15 },
+  body:   { stiffness: 40, damping: 12 },
+};
+
+// Un resorte de quaternion por hueso. Se inicializa lazy en el primer frame.
+const _springs = new Map(); // boneName → { vel: Quaternion, params }
+
+export function initSprings() {
+  _springs.clear();
+}
+
+function _getSpring(boneName, params) {
+  if (!_springs.has(boneName)) {
+    _springs.set(boneName, { vel: new THREE.Quaternion(0, 0, 0, 0), params });
+  }
+  return _springs.get(boneName);
+}
+
+// Avanza el resorte de quaternion un paso dt hacia targetQ.
+// Implementación: spring semi-implícito en espacio de eje-ángulo.
+// La velocidad se expresa como quaternion de velocidad angular (eje × velocidad_escalar / 2).
+const _axisAngle = new THREE.Vector3();
+const _deltaQ    = new THREE.Quaternion();
+
+function _stepSpring(spring, currentQ, targetQ, dt) {
+  const { stiffness, damping } = spring.params;
+
+  // Error: quaternion que va de current a target (en espacio local)
+  _deltaQ.copy(currentQ).conjugate().multiply(targetQ);
+  // Normalizar al hemisferio positivo (camino mínimo)
+  if (_deltaQ.w < 0) { _deltaQ.x *= -1; _deltaQ.y *= -1; _deltaQ.z *= -1; _deltaQ.w *= -1; }
+
+  // Convertir a eje-ángulo escalado (≈ log del quaternion para ángulos pequeños)
+  _axisAngle.set(_deltaQ.x, _deltaQ.y, _deltaQ.z);
+  const sinHalf = _axisAngle.length();
+  const angle = sinHalf > 1e-6 ? 2 * Math.atan2(sinHalf, _deltaQ.w) : 0;
+  if (sinHalf > 1e-6) _axisAngle.multiplyScalar(angle / sinHalf);
+  else _axisAngle.set(0, 0, 0);
+
+  // Velocidad en formato eje-ángulo
+  const vx = spring.vel.x, vy = spring.vel.y, vz = spring.vel.z;
+
+  // Aceleración: resorte + amortiguación
+  const ax = stiffness * _axisAngle.x - damping * vx;
+  const ay = stiffness * _axisAngle.y - damping * vy;
+  const az = stiffness * _axisAngle.z - damping * vz;
+
+  // Integración semi-implícita (estable para dt grandes)
+  const nvx = vx + ax * dt;
+  const nvy = vy + ay * dt;
+  const nvz = vz + az * dt;
+  spring.vel.set(nvx, nvy, nvz, 0);
+
+  // Aplicar desplazamiento: convertir velocidad × dt a quaternion incremental
+  const dx = nvx * dt * 0.5, dy = nvy * dt * 0.5, dz = nvz * dt * 0.5;
+  const dLen = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  let incQ;
+  if (dLen > 1e-8) {
+    const s = Math.sin(dLen) / dLen;
+    incQ = new THREE.Quaternion(dx * s, dy * s, dz * s, Math.cos(dLen));
+  } else {
+    incQ = new THREE.Quaternion(dx, dy, dz, 1).normalize();
+  }
+  return currentQ.clone().multiply(incQ).normalize();
+}
+
 // ── Retargeting ───────────────────────────────────────────────────────────────
 
 // Scratch compartido entre rotateBone y applyHandOrientation
@@ -132,7 +214,9 @@ const _hSide       = new THREE.Vector3();
 const _hQ          = new THREE.Quaternion();
 const _lateralAxis = new THREE.Vector3();
 
-export function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
+// dt en segundos. springParams: uno de SPRING_PARAMS.finger/wrist/body.
+// Si dt es null/0 se hace snap instantáneo (comportamiento del lerp original).
+export function rotateBone(bone, targetDir, springParams = SPRING_PARAMS.body, dt = 0) {
   const restDir    = state.boneRestDir.get(bone.name);
   const restWorldQ = state.boneRestWorldQ.get(bone.name);
   if (!restDir || !restWorldQ) return;
@@ -141,28 +225,34 @@ export function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
   if (_dir.lengthSq() < 1e-6) return;
   _dir.normalize();
 
+  // Quaternion local objetivo
   _dQ.setFromUnitVectors(restDir, _dir);
   _tWQ.multiplyQuaternions(_dQ, restWorldQ);
-
   if (bone.parent) {
     bone.parent.getWorldQuaternion(_pWQ);
     _tLQ.multiplyQuaternions(_pWQ.invert(), _tWQ);
   } else {
     _tLQ.copy(_tWQ);
   }
-  bone.quaternion.slerp(_tLQ, alpha);
+
+  if (dt > 0) {
+    const spring = _getSpring(bone.name, springParams);
+    bone.quaternion.copy(_stepSpring(spring, bone.quaternion, _tLQ, dt));
+  } else {
+    bone.quaternion.copy(_tLQ);
+  }
   bone.updateMatrixWorld(true);
 }
 
 // Orienta la muñeca con roll completo (giro alrededor del eje del dedo).
 // normalSign: +1 mano izquierda, -1 mano derecha.
-export function applyHandOrientation(bone, rawLms, normalSign) {
+export function applyHandOrientation(bone, rawLms, normalSign, dt = 0) {
   const w = rawLms[0];
 
   _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * FINGER_Z_SCALE);
   if (_hUp.lengthSq() < 1e-8) return;
   _hUp.normalize();
-  rotateBone(bone, _hUp);
+  rotateBone(bone, _hUp, SPRING_PARAMS.wrist, dt);
 
   _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z) * FINGER_Z_SCALE);
   _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z) * FINGER_Z_SCALE);
@@ -187,7 +277,13 @@ export function applyHandOrientation(bone, rawLms, normalSign) {
   } else {
     _tLQ.copy(_tWQ);
   }
-  bone.quaternion.slerp(_tLQ, state.smoothAlpha);
+
+  if (dt > 0) {
+    const spring = _getSpring(bone.name + "_roll", SPRING_PARAMS.wrist);
+    bone.quaternion.copy(_stepSpring(spring, bone.quaternion, _tLQ, dt));
+  } else {
+    bone.quaternion.copy(_tLQ);
+  }
   bone.updateMatrixWorld(true);
 
   if (bone.name === "DEF-handL") state.palmNormalL.copy(_hNorm);
@@ -208,11 +304,11 @@ function _pinchFactor(lms) {
 // Punto de entrada central para animar muñecas y dedos a partir de handsMap
 // (landmarks ya filtrados, congelados y con constraints aplicados).
 // Para modificar la naturaleza del movimiento (spring, delay, ruido), editar aquí.
-export function applyFingers(handsMap) {
+export function applyFingers(handsMap, dt = 0) {
   const bHL = state.bones.get("DEF-handL");
   const bHR = state.bones.get("DEF-handR");
-  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
-  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1);
+  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1, dt);
+  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1, dt);
 
   const pinchL = handsMap["Left"]  ? _pinchFactor(handsMap["Left"])  : 1;
   const pinchR = handsMap["Right"] ? _pinchFactor(handsMap["Right"]) : 1;
@@ -267,6 +363,6 @@ export function applyFingers(handsMap) {
       }
     }
 
-    rotateBone(bone, dir, state.fingerAlpha);
+    rotateBone(bone, dir, SPRING_PARAMS.finger, dt);
   }
 }
