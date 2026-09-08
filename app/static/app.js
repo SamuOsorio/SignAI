@@ -2,19 +2,21 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-// ── Mapeo landmarks MediaPipe → huesos DEF de Rigify ────────────────────────
+// ── Mapeo landmarks MediaPipe → huesos AutoRigPro ────────────────────────────
 // [nombre_hueso, idx_landmark_inicio, idx_landmark_fin]
+// Convención AutoRigPro: thumb1/2/3, index1/2/3, middle1/2/3, ring1/2/3, pinky1/2/3
+// Sufijos: .l = izquierda, .r = derecha
 const BONE_MAP = [
-  ["thumb01L",    1, 2],  ["thumb02L",    2, 3],  ["thumb03L",    3, 4],
-  ["f_index01L",  5, 6],  ["f_index02L",  6, 7],  ["f_index03L",  7, 8],
-  ["f_middle01L", 9,10],  ["f_middle02L",10,11],  ["f_middle03L",11,12],
-  ["f_ring01L",  13,14],  ["f_ring02L",  14,15],  ["f_ring03L",  15,16],
-  ["f_pinky01L", 17,18],  ["f_pinky02L", 18,19],  ["f_pinky03L", 19,20],
-  ["thumb01R",    1, 2],  ["thumb02R",    2, 3],  ["thumb03R",    3, 4],
-  ["f_index01R",  5, 6],  ["f_index02R",  6, 7],  ["f_index03R",  7, 8],
-  ["f_middle01R", 9,10],  ["f_middle02R",10,11],  ["f_middle03R",11,12],
-  ["f_ring01R",  13,14],  ["f_ring02R",  14,15],  ["f_ring03R",  15,16],
-  ["f_pinky01R", 17,18],  ["f_pinky02R", 18,19],  ["f_pinky03R", 19,20],
+  ["thumb1.l",  1, 2],  ["thumb2.l",  2, 3],  ["thumb3.l",  3, 4],
+  ["index1.l",  5, 6],  ["index2.l",  6, 7],  ["index3.l",  7, 8],
+  ["middle1.l", 9,10],  ["middle2.l",10,11],  ["middle3.l",11,12],
+  ["ring1.l",  13,14],  ["ring2.l",  14,15],  ["ring3.l",  15,16],
+  ["pinky1.l", 17,18],  ["pinky2.l", 18,19],  ["pinky3.l", 19,20],
+  ["thumb1.r",  1, 2],  ["thumb2.r",  2, 3],  ["thumb3.r",  3, 4],
+  ["index1.r",  5, 6],  ["index2.r",  6, 7],  ["index3.r",  7, 8],
+  ["middle1.r", 9,10],  ["middle2.r",10,11],  ["middle3.r",11,12],
+  ["ring1.r",  13,14],  ["ring2.r",  14,15],  ["ring3.r",  15,16],
+  ["pinky1.r", 17,18],  ["pinky2.r", 18,19],  ["pinky3.r", 19,20],
 ];
 
 // Índices de landmarks MediaPipe Pose relevantes para cada brazo
@@ -152,7 +154,7 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
   });
 
   const fingerBones = [...state.bones.keys()].filter(n =>
-    /^(thumb|f_index|f_middle|f_ring|f_pinky)\d+[LR]$/.test(n));
+    /^(thumb|index|middle|ring|pinky)\d+\.[lr]$/.test(n));
   const nDEF = fingerBones.length;
 
   // Medir rest pose de los brazos para el solver IK
@@ -175,8 +177,8 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 // Captura posiciones y longitudes de los brazos desde la rest pose del GLB.
 function measureArmRest() {
   const g  = state.armRest;
-  const bSL = state.bones.get("DEF-upper_armL"), bEL = state.bones.get("DEF-forearmL"), bWL = state.bones.get("DEF-handL");
-  const bSR = state.bones.get("DEF-upper_armR"), bER = state.bones.get("DEF-forearmR"), bWR = state.bones.get("DEF-handR");
+  const bSL = state.bones.get("arm_stretch.l"), bEL = state.bones.get("forearm_stretch.l"), bWL = state.bones.get("hand.l");
+  const bSR = state.bones.get("arm_stretch.r"), bER = state.bones.get("forearm_stretch.r"), bWR = state.bones.get("hand.r");
   if (!bSL || !bEL || !bWL || !bSR || !bER || !bWR) return;
   const eL = new THREE.Vector3(), wL = new THREE.Vector3();
   const eR = new THREE.Vector3(), wR = new THREE.Vector3();
@@ -248,11 +250,11 @@ function applyArmIK(body) {
   const g = state.armRest;
 
   _applyOneArm(body, 11, 13, 15,
-    "DEF-upper_armL", "DEF-upper_armL001", "DEF-forearmL", "DEF-forearmL001",
+    "arm_stretch.l", "arm_twist.l", "forearm_stretch.l", "forearm_twist.l",
     g.shoulderL, g.L_upperL, g.L_foreL, scale);
 
   _applyOneArm(body, 12, 14, 16,
-    "DEF-upper_armR", "DEF-upper_armR001", "DEF-forearmR", "DEF-forearmR001",
+    "arm_stretch.r", "arm_twist.r", "forearm_stretch.r", "forearm_twist.r",
     g.shoulderR, g.L_upperR, g.L_foreR, scale);
 }
 
@@ -388,7 +390,7 @@ function applyHandOrientation(bone, rawLms, normalSign) {
   bone.updateMatrixWorld(true);
 
   // Guardar normal de palma para que el loop de dedos proyecte sobre este plano
-  if (bone.name === "DEF-handL") state.palmNormalL.copy(_hNorm);
+  if (bone.name === "hand.l") state.palmNormalL.copy(_hNorm);
   else                           state.palmNormalR.copy(_hNorm);
 }
 
@@ -491,8 +493,8 @@ function applyFrame(frameData) {
   for (const h of frameData.hands) handsMap[h.hand] = h.landmarks;
 
   // Orientación completa de la muñeca (incluye roll) antes de animar dedos
-  const bHL = state.bones.get("DEF-handL");
-  const bHR = state.bones.get("DEF-handR");
+  const bHL = state.bones.get("hand.l");
+  const bHR = state.bones.get("hand.r");
   // normalSign +1 para mano izquierda (cross(idx,pnk) apunta hacia la palma),
   // -1 para mano derecha (los dedos aparecen en orden inverso → normal al revés).
   if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
@@ -502,7 +504,7 @@ function applyFrame(frameData) {
     const bone = state.bones.get(boneName);
     if (!bone) continue;
 
-    const side      = boneName.endsWith("L") ? "Left" : "Right";
+    const side      = boneName.endsWith(".l") ? "Left" : "Right";
     const rawLms    = handsMap[side];
     if (!rawLms) continue;
 
