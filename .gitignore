@@ -16,6 +16,12 @@ blender/*.blend
 blender/*.blend1
 blender/RiS_StartFiles_v2.zip
 blender/RiS_StartFiles_v2/
+blender/__MACOSX/
+blender/**/__MACOSX/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
 
 # Modelo binario de MediaPipe (descargable)
 scripts/hand_landmarker.task
