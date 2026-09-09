@@ -10,14 +10,9 @@ data/IMU/
 scripts/landmarks/
 app/video_cache/
 
-# Assets externos de Blender
+# Assets externos de Blender (carpeta completa ignorada)
 assets/
-blender/*.blend
-blender/*.blend1
-blender/RiS_StartFiles_v2.zip
-blender/RiS_StartFiles_v2/
-blender/__MACOSX/
-blender/**/__MACOSX/
+blender/
 
 # macOS metadata
 .DS_Store
