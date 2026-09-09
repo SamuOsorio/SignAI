@@ -5,6 +5,16 @@ signai_env/
 data/VIDEOS.zip
 data/LANDMARKS/
 data/IMU/
+data/LSC50.pdf
+
+# Documentación de tesis (archivos locales)
+docs/*.pdf
+docs/*.docx
+
+# Scripts de autor para Blender (no corren en el servidor)
+scripts/export_avatar.py
+scripts/setup_rig.py
+scripts/retarget_blender.py
 
 # Generados en runtime
 scripts/landmarks/
