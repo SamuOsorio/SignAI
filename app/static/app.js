@@ -8,16 +8,10 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 // Convención AutoRigPro: thumb1/2/3, index1/2/3, middle1/2/3, ring1/2/3, pinky1/2/3
 // NOTA: Three.js elimina los puntos de los nombres (arm_stretch.l → arm_stretchl)
 // [nombre_hueso, idx_lm_inicio, idx_lm_fin]
-// index1_base / middle1_base / ring1_base / pinky1_base = metacarpianos de ARP.
-// Sus pesos fueron transferidos a hand.l/r en Blender, pero animarlos aquí hace
-// que los nudillos acompañen la dirección de cada dedo (palma más expresiva).
-// El vector wrist→lm5 orienta el metacarpiano del índice, etc.
+// Los metacarpianos (index1_base / … / pinky1_base) NO se animan: sus pesos ya se
+// transfirieron a hand.l/r en Blender (aportan poco al mesh) y orientarlos desde
+// wrist→nudillo, que es ruidoso, abría la palma en abanico. (bundle dedos, punto A)
 const BONE_MAP = [
-  // Metacarpianos (dirección palma → nudillo)
-  ["index1_basel",  0, 5],  ["middle1_basel",  0, 9],
-  ["ring1_basel",   0,13],  ["pinky1_basel",   0,17],
-  ["index1_baser",  0, 5],  ["middle1_baser",  0, 9],
-  ["ring1_baser",   0,13],  ["pinky1_baser",   0,17],
   // Falanges izquierda
   ["thumb1l",  1, 2],  ["thumb2l",  2, 3],  ["thumb3l",  3, 4],
   ["index1l",  5, 6],  ["index2l",  6, 7],  ["index3l",  7, 8],
@@ -69,10 +63,14 @@ const state = {
   // Fracción [0,1] que avanza hacia el quaternion objetivo cada tick de rAF.
   // 0.12 ≈ convergencia en ~6 frames a 60fps (~100ms), buen balance suavidad/lag.
   smoothAlpha: 0.12,
-  // Normal de palma por mano, actualizada cada frame en applyHandOrientation.
-  // Usada por el loop de dedos para proyectar direcciones sobre el plano de la palma.
-  palmNormalL: new THREE.Vector3(0, 0, 1),
-  palmNormalR: new THREE.Vector3(0, 0, 1),
+  // Suavizado propio de las falanges: mucho más bajo que el de brazos porque los
+  // segmentos de dedo son ~5-9 px en imagen → señal ≈ ruido aún tras el filtro
+  // temporal del server. (bundle dedos, punto C)
+  fingerAlpha: 0.06,
+  // Deadzone adaptativo: se ignora la rotación de una falange cuando su vector de
+  // segmento es más corto que fingerDeadzone × (largo de palma wrist→MCP medio).
+  // Evita rotar hacia ruido puro cuando el dedo casi no se mueve. (bundle dedos, punto B)
+  fingerDeadzone: 0.12,
   // Posiciones world de hombros y longitudes de segmentos de brazo en rest pose.
   // Se calcula una vez al cargar el GLB y se usa para el IK de brazos.
   armRest: {
@@ -317,6 +315,18 @@ const _ikWristR     = new THREE.Vector3();
 // 0.8 lleva las muñecas al 80% del camino hacia el punto medio → manos casi juntas.
 const CONTACT_BLEND = 0.8;
 
+// Sesgo lateral del codo hacia afuera (fracción del alcance del brazo). En señas
+// frente al pecho los targets de muñeca caen cerca de la línea media → sin esto
+// los codos colapsan contra las costillas y los antebrazos se pegan al torso.
+// Se atenúa cuando la mano sube (con el brazo en alto el codo real ya define
+// bien la pose y forzar "afuera" produce un ala de pollo).
+const ELBOW_OUT = 0.18;
+
+// Empuje del target de muñeca hacia la cámara cuando queda cerca del torso y a la
+// altura del pecho o más arriba → la mano/antebrazo pasan POR DELANTE del cuerpo
+// en vez de atravesarlo (fracción del alcance del brazo).
+const TORSO_CLEAR = 0.30;
+
 function applyArmIK(body, handsArr, frameState) {
   if (!state.armRest.L_upperL) return; // measureArmRest aún no corrió
   const scale = bodyScale(body);
@@ -354,6 +364,16 @@ function _applyOneArm(body, iS, iE, wristTarget,
   _ikWrist.copy(wristTarget);
   lmWorldOffset(body[iE], body[iS], scale, shoulderWorld, _ikEHint);
 
+  const reach = L1 + L2;
+
+  // Anti-clip: mano cerca de la línea media + a la altura del pecho o más arriba
+  // → empujar el target hacia la cámara para que pase por delante del torso.
+  const nearBody = THREE.MathUtils.clamp(
+    1 - Math.abs(_ikWrist.x - shoulderWorld.x) / (reach * 0.6), 0, 1);
+  const chestUp  = THREE.MathUtils.clamp(
+    (_ikWrist.y - (shoulderWorld.y - reach * 0.5)) / (reach * 0.7), 0, 1);
+  _ikWrist.z += nearBody * chestUp * reach * TORSO_CLEAR;
+
   // Vector de polo = dirección del codo desde el hombro.
   // Problema: cuando la mano está por encima del hombro, el vector codo→hombro
   // y el vector hombro→muñeca son casi paralelos → después de proyectar, el polo
@@ -362,8 +382,14 @@ function _applyOneArm(body, iS, iE, wristTarget,
   // por debajo de la línea hombro-muñeca (posición anatómica en LSC),
   // más un pequeño bias frontal para compensar la subestimación de z normalizado.
   _ikPole.subVectors(_ikEHint, shoulderWorld);
-  _ikPole.y -= (L1 + L2) * 0.35; // codo hacia abajo (anatómico)
-  _ikPole.z += (L1 + L2) * 0.10; // leve bias frontal
+  _ikPole.y -= reach * 0.35;  // codo hacia abajo (anatómico)
+  _ikPole.z += reach * 0.10;  // leve bias frontal
+
+  // Codo hacia afuera, atenuado a medida que la muñeca sube por encima del hombro
+  // (raise: 1 con la mano baja → 0.1 con la mano bien alta).
+  const raise = THREE.MathUtils.clamp(
+    1 - (_ikWrist.y - shoulderWorld.y + reach * 0.1) / (reach * 0.4), 0.1, 1);
+  _ikPole.x += Math.sign(shoulderWorld.x) * reach * ELBOW_OUT * raise;
 
   solveIKElbow(shoulderWorld, _ikWrist, _ikPole, L1, L2);
   // _ikElbow ← posición del codo resuelto por IK
@@ -435,18 +461,24 @@ function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
 // normalSign: +1 si cross(idx,pnk) apunta hacia la palma en world-space (mano izquierda),
 //             -1 si apunta en sentido contrario (mano derecha — los dedos aparecen
 //             en orden inverso en la imagen porque la mano está espejada).
+// Factor para el z crudo de MediaPipe Hands en la orientación de muñeca.
+// z tiene span ~0.014 en toda la mano y es ruidoso → a escala 1.0 hacía que la
+// muñeca temblara/torciera. A 0.3 conserva la señal de "palma hacia/desde cámara"
+// con ~3× menos ruido. (bundle dedos, punto E)
+const Z_HAND = 0.3;
+
 function applyHandOrientation(bone, rawLms, normalSign) {
   const w = rawLms[0];
 
   // ── Paso 1: alinear eje Y del hueso al dedo medio ───────────────────────
-  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z));
+  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * Z_HAND);
   if (_hUp.lengthSq() < 1e-8) return;
   _hUp.normalize();
   rotateBone(bone, _hUp); // slerp incluido
 
   // ── Paso 2: roll — girar el hueso para que su Z apunte a la normal de palma ──
-  _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z));
-  _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z));
+  _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z) * Z_HAND);
+  _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z) * Z_HAND);
   _hNorm.crossVectors(_hIdxV, _hPnkV).multiplyScalar(normalSign);
   if (_hNorm.lengthSq() < 1e-8) return;
   _hNorm.normalize();
@@ -477,10 +509,6 @@ function applyHandOrientation(bone, rawLms, normalSign) {
   }
   bone.quaternion.slerp(_tLQ, state.smoothAlpha); // roll suavizado igual que Y
   bone.updateMatrixWorld(true);
-
-  // Guardar normal de palma para que el loop de dedos proyecte sobre este plano
-  if (bone.name === "handl") state.palmNormalL.copy(_hNorm);
-  else                           state.palmNormalR.copy(_hNorm);
 }
 
 // ── Animación facial ─────────────────────────────────────────────────────────
@@ -589,6 +617,13 @@ function applyFrame(frameData) {
   if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
   if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1);
 
+  // Escala de cada mano = largo de palma (wrist → MCP medio), base del deadzone.
+  const handSpan = {};
+  for (const s of ["Left", "Right"]) {
+    const lm = handsMap[s];
+    if (lm) handSpan[s] = mpToThree(lm[9], lm[0]).length();
+  }
+
   for (const [boneName, lmStart, lmEnd] of BONE_MAP) {
     const bone = state.bones.get(boneName);
     if (!bone) continue;
@@ -597,15 +632,16 @@ function applyFrame(frameData) {
     const rawLms    = handsMap[side];
     if (!rawLms) continue;
 
-    const palmNorm  = side === "Left" ? state.palmNormalL : state.palmNormalR;
     const wrist     = rawLms[0];
     const dir = mpToThree(rawLms[lmEnd], wrist).sub(mpToThree(rawLms[lmStart], wrist));
 
-    // Proyectar sobre el plano de la palma: elimina la componente perpendicular
-    // a la palma que en video monocular es ruido puro.
-    dir.addScaledVector(palmNorm, -dir.dot(palmNorm));
+    // Deadzone adaptativo (punto B): segmento por debajo del piso de ruido → no rotar.
+    if (dir.length() < (handSpan[side] ?? 0) * state.fingerDeadzone) continue;
 
-    rotateBone(bone, dir);
+    // Sin proyección al plano de la palma: la normal de palma se calcula con
+    // cross() de dos vectores casi coplanares → dirección aleatoria entre frames,
+    // así que proyectar metía ruido en vez de quitarlo. (bundle dedos, punto D)
+    rotateBone(bone, dir, state.fingerAlpha);
   }
 }
 

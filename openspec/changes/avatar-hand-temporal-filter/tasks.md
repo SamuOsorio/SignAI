@@ -87,11 +87,7 @@ falange distal casi no lleva señal intencional, por eso retener ~48% ahí es ac
 
 ## 5. Siguiente
 
-- [ ] 5.1 Bundle en `app.js` (ahora con menos ruido de entrada debería hacer falta menos):
-  - A: quitar los 8 metacarpianos (`*1_base*`) de `BONE_MAP`
-  - C: `FINGER_ALPHA ≈ 0.06` (suavizado propio de dedos, separado del de brazos)
-  - D: quitar la proyección al plano de palma en el loop de dedos (normal `cross()` inestable)
-  - E: `z = 0` en `applyHandOrientation` (`_hUp/_hIdxV/_hPnkV`), consistente con los dedos
-  - B: deadzone adaptativo (fracción del tamaño de mano), NO umbral fijo
+- [x] 5.1 Bundle en `app.js` (A/C/D/E + B) → hecho en el change `avatar-finger-bundle-arm-ik`
+  (que además ajustó la IK de brazo: `ELBOW_OUT` con gate de altura + anti-clip de torso).
 - [ ] 5.2 Paso 2 "de verdad": convertir cada falange en bisagra anatómica (flexión en 1 eje,
   0–90°, sin torsión ni desviación lateral) — reescribir `rotateBone` para dedos.

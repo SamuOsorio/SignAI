@@ -67,19 +67,29 @@ _applyOneArm(body, 11, 13, 15,
 
 ### Huesos de dedos (BONE_MAP en app.js)
 ```
-Metacarpianos (palma → nudillo):
-  index1_basel [lm0→5]  middle1_basel [lm0→9]
-  ring1_basel  [lm0→13] pinky1_basel  [lm0→17]
-  (ídem con "r")
-
-Falanges (proximal → distal por dedo):
+Falanges (proximal → distal por dedo) — 30 huesos:
   thumb1l[1→2]  thumb2l[2→3]  thumb3l[3→4]
   index1l[5→6]  index2l[6→7]  index3l[7→8]
   middle1l[9→10] middle2l[10→11] middle3l[11→12]
   ring1l[13→14]  ring2l[14→15]  ring3l[15→16]
   pinky1l[17→18] pinky2l[18→19] pinky3l[19→20]
   (ídem con "r")
+
+Metacarpianos (index1_base…pinky1_base): en el rig pero NO en BONE_MAP.
+Se quitaron (change avatar-finger-bundle-arm-ik): orientarlos desde wrist→nudillo
+abría la palma en abanico; sus pesos ya están en hand.l/r.
 ```
+
+### Retargeting de falanges (loop en `applyFrame`, change `avatar-finger-bundle-arm-ik`)
+```
+dir = mpToThree(lmEnd, wrist) − mpToThree(lmStart, wrist)   // z ya suprimido
+// Deadzone adaptativo: si |dir| < handSpan · fingerDeadzone → no rotar este frame
+//   handSpan = |mpToThree(lm9, lm0)| (largo de palma)
+//   fingerDeadzone = 0.12
+rotateBone(bone, dir, state.fingerAlpha)                    // fingerAlpha = 0.06
+```
+Sin proyección al plano de palma (la normal `cross()` era ruido en mano casi plana).
+`applyHandOrientation` escala el `z` crudo por `Z_HAND = 0.3` (no lo anula: mataría el roll).
 
 ### Medidas del rig (verificadas en runtime)
 ```
@@ -131,11 +141,25 @@ out = Vector3(
 
 ### Solver IK de 2 huesos (ley de cosenos)
 ```js
-// shoulder → target, pole da dirección del codo
-// Polo: codo hacia abajo (anatómico) + leve bias frontal
+// shoulder → target, pole da dirección del codo. reach = L1 + L2
 _ikPole.subVectors(elbow_hint, shoulder)
-_ikPole.y -= (L1 + L2) * 0.35   // codo cuelga debajo de hombro-muñeca
-_ikPole.z += (L1 + L2) * 0.10   // leve sesgo hacia la cámara
+_ikPole.y -= reach * 0.35        // codo cuelga debajo de hombro-muñeca (anatómico)
+_ikPole.z += reach * 0.10        // leve sesgo hacia la cámara
+
+// Codo hacia afuera (despega el brazo del torso en señas frente al pecho),
+// atenuado cuando la muñeca sube — si no, "ala de pollo" con el brazo en alto.
+raise = clamp(1 - (wristY - shoulderY + reach*0.1) / (reach*0.4), 0.1, 1)
+_ikPole.x += sign(shoulderX) * reach * ELBOW_OUT * raise   // ELBOW_OUT = 0.18
+```
+
+### Anti-clip de torso
+```js
+// Con Z_SCALE = 0.15 el offset frontal de la muñeca casi se anula → mano/antebrazo
+// atravesaban el pecho al subir hacia la cara. Empuje hacia la cámara si el target
+// está cerca de la línea media Y a la altura del pecho o más arriba.
+nearBody = clamp(1 - |wristX - shoulderX| / (reach*0.6), 0, 1)
+chestUp  = clamp((wristY - (shoulderY - reach*0.5)) / (reach*0.7), 0, 1)
+_ikWrist.z += nearBody * chestUp * reach * TORSO_CLEAR     // TORSO_CLEAR = 0.30
 ```
 
 ### CONTACT_BLEND — manos en contacto
@@ -227,11 +251,11 @@ if old_w < 1e-5:
 
 | Parte | Estado | Implementación |
 |-------|--------|----------------|
-| Dedos (30 huesos) | ✅ Funciona | BONE_MAP + rotateBone() + proyección palmNorm |
-| Metacarpianos (4 por mano) | ✅ Funciona | BONE_MAP con lm0→5, lm0→9, lm0→13, lm0→17 |
-| Muñeca roll (palma) | ✅ Funciona | applyHandOrientation() con cross(idx,pnk) |
-| Codo | ✅ Funciona | IK 2-huesos (solveIKElbow) |
-| Hombro | ✅ Funciona | IK 2-huesos |
+| Dedos (30 huesos) | ✅ Funciona | BONE_MAP + rotateBone(dir, fingerAlpha=0.06) + deadzone adaptativo; SIN proyección palmNorm |
+| Metacarpianos (4 por mano) | ❌ No animar | Quitados de BONE_MAP (abrían la palma en abanico) |
+| Muñeca roll (palma) | ✅ Funciona | applyHandOrientation() con cross(idx,pnk), z crudo × Z_HAND=0.3 |
+| Codo | ✅ Funciona | IK 2-huesos (solveIKElbow) + ELBOW_OUT con gate de altura + anti-clip torso |
+| Hombro (arm_stretch) | ✅ Funciona | IK 2-huesos. El hueso `shoulder` NO se anima → tears de pectoral con brazo muy alto (ver P1b) |
 | Arm/forearm twist | ❌ No animar | Hijos heredan rotación → doble giro si se animan |
 | Mandíbula (boca) | ✅ Funciona | DEF-jaw_master, FACE_ALPHA=1.0 |
 | Cejas | ✅ Funciona | DEF-browTL / DEF-browTR (sin puntos en este GLB) |
@@ -249,19 +273,11 @@ if old_w < 1e-5:
 
 | # | Problema | Causa probable | Prioridad |
 |---|---------|----------------|-----------|
-| P1 | Dedos en "claw" durante CONTACT | palmNorm incorrecto cuando palma muy rotada en oclusión | Alta |
+| P1 | Falanges: rotación de arco más corto (sin bisagra) → se tuercen/abren de costado con ruido | `rotateBone` usa `setFromUnitVectors` en 3D. Mitigado (filtro One-Euro + fingerAlpha + deadzone); fix real = bisagra anatómica por falange | Media |
+| P1b | "Se abre el pecho" al subir mucho el brazo | Artefacto de skinning: pesos flojos de hombro/pectoral (ver `copiamodelo-rig-ik-contacto` §2/§8) + el hueso `shoulder` no se anima → todo el giro va a `arm_stretch`. Mitigado al no forzar codo-afuera con brazo alto; fix = weight painting o animar `shoulder` | Media |
 | P2 | Avatar sin textura de piel (color plano) | GLB sin material/textura; mitigado con material mate + IBL en runtime (change `avatar-shading-material`). Textura UV real requiere re-export desde Blender | Baja |
 | P3 | Piernas low-poly (poco detalle) | Malla original con baja resolución en pelvis/piernas; solo se corrige re-exportando con subdivisión | Baja |
 | P4 | Ceja derecha casi estática | Weight painting asimétrico (si aplica al nuevo rig) | Baja |
-
-### P1 — Fix tentativo para dedos durante CONTACT
-```js
-// Desactivar proyección sobre palmNorm durante CONTACT:
-const palmNorm = state === 'CONTACT'
-  ? new THREE.Vector3(0, 0, 1)   // normal frontal neutra → sin restricción de plano
-  : (side === 'Left' ? state.palmNormalL : state.palmNormalR)
-dir.addScaledVector(palmNorm, -dir.dot(palmNorm));
-```
 
 ---
 
