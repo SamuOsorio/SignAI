@@ -15,7 +15,7 @@
 | `app/static/avatar.glb` | GLB exportado desde ARP.blend (con fix_all_weights aplicado) |
 | `blender/fix_all_weights.py` | Script Blender (puro `bpy.data`) para corregir weight painting antes de exportar |
 | `app/static/app.js` | Animación Three.js: IK de brazos, retargeting de dedos, cara |
-| `app/hand_corrector.py` | Corrector de landmarks de mano (CONTACT/HOLD/BLEND) |
+| `app/hand_corrector.py` | Corrector de landmarks de mano (CONTACT/HOLD/BLEND + filtro temporal One-Euro) |
 | `app/server.py` | Flask: sirve landmarks corregidos con HandCorrector |
 
 ---
@@ -159,6 +159,7 @@ _ikWristR.lerp(_ikContactMid, 0.8)
 | `CONTACT` | prox_xy(palmL, palmR) < 0.09 | Preservar lm0 (wrist real), congelar lm1-20 (dedos pre-contacto) |
 | `HOLD` | Mano desaparece (tracking loss) | Mantener última pose válida hasta 8 frames, luego decay×0.85 |
 | `BLEND` | mean_disp entre frames > 0.10 | Mezclar alpha=0.40 con frame anterior |
+| `FILTER` | siempre (último paso) | Filtro temporal One-Euro por landmark/eje, sobre la pose ya corregida |
 
 **CRÍTICO**: en CONTACT, lm0 (muñeca) SÍ se preserva actual (lo usa el IK de brazo).
 Solo lm1-20 (dedos) se congelan. Versión anterior congelaba todo → IK de brazo no se actualizaba.
@@ -167,6 +168,19 @@ Solo lm1-20 (dedos) se congelan. Versión anterior congelaba todo → IK de braz
 r_lm = [r_lm[0]] + r_frozen[1:]   # wrist actual + dedos pre-contacto
 l_lm = [l_lm[0]] + l_frozen[1:]
 ```
+
+### Filtro temporal One-Euro (paso 3b, change `avatar-hand-temporal-filter`)
+
+Motivo: la mano ocupa ~3% del frame en las 50 señas → los segmentos de falange (~5–9 px)
+quedan al nivel del jitter de MediaPipe (~0.009/frame) → dedos y muñeca tiemblan.
+
+- `_OneEuro` (Casiez et al. 2012): pasa-bajos con `cutoff = min_cutoff + beta·|dx_filtrado|`.
+- `_HandFilter`: banco de 21×3 filtros por mano; `reset()` al perder la mano.
+- Se aplica en `_process_frame` **después** de CONTACT/HOLD/BLEND, sobre `r_lm`/`l_lm`.
+- Parámetros (escala coords 0–1, por eso `beta` grande): `MIN_CUTOFF=1.0`, `BETA=18.0`,
+  `D_CUTOFF=1.0`, `FPS=24`. Flag `filter_enabled` en el constructor.
+- Resultado (50 señas): jitter angular de falange distal ↓ ~61%, trayectoria real ↓ ~12%,
+  lag ~0 frames. Tuning: más mushy → subir `MIN_CUTOFF`/`BETA`; más tembloroso → bajar `MIN_CUTOFF`.
 
 Stats incluidos en JSON de `/api/landmarks/<id>`:
 ```json

@@ -14,7 +14,7 @@ context: |
     (Rig anterior: Rigify/Prueba2.glb en rama master — OBSOLETO)
   - Landmark capture: MediaPipe Tasks API
   - Dataset: LSC50 (50 señas, 5 voluntarios, 4 reps = 1000 videos)
-  - HandCorrector: `app/hand_corrector.py` — corrige CONTACT/HOLD/BLEND en secuencias de landmarks
+  - HandCorrector: `app/hand_corrector.py` — corrige CONTACT/HOLD/BLEND + filtro temporal One-Euro (paso 3b) en secuencias de landmarks
 
   ### Dataset LSC50 — formato de IDs y archivos
   ID: `SSSS_VVVV_RRRR` = seña_voluntario_repetición (NO seña_rep_ángulo)
