@@ -5,18 +5,30 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 // ── Mapeo landmarks MediaPipe → huesos AutoRigPro ────────────────────────────
 // [nombre_hueso, idx_landmark_inicio, idx_landmark_fin]
 // Convención AutoRigPro: thumb1/2/3, index1/2/3, middle1/2/3, ring1/2/3, pinky1/2/3
-// Sufijos: .l = izquierda, .r = derecha
+// NOTA: Three.js elimina los puntos de los nombres (arm_stretch.l → arm_stretchl)
+// [nombre_hueso, idx_lm_inicio, idx_lm_fin]
+// index1_base / middle1_base / ring1_base / pinky1_base = metacarpianos de ARP.
+// Sus pesos fueron transferidos a hand.l/r en Blender, pero animarlos aquí hace
+// que los nudillos acompañen la dirección de cada dedo (palma más expresiva).
+// El vector wrist→lm5 orienta el metacarpiano del índice, etc.
 const BONE_MAP = [
-  ["thumb1.l",  1, 2],  ["thumb2.l",  2, 3],  ["thumb3.l",  3, 4],
-  ["index1.l",  5, 6],  ["index2.l",  6, 7],  ["index3.l",  7, 8],
-  ["middle1.l", 9,10],  ["middle2.l",10,11],  ["middle3.l",11,12],
-  ["ring1.l",  13,14],  ["ring2.l",  14,15],  ["ring3.l",  15,16],
-  ["pinky1.l", 17,18],  ["pinky2.l", 18,19],  ["pinky3.l", 19,20],
-  ["thumb1.r",  1, 2],  ["thumb2.r",  2, 3],  ["thumb3.r",  3, 4],
-  ["index1.r",  5, 6],  ["index2.r",  6, 7],  ["index3.r",  7, 8],
-  ["middle1.r", 9,10],  ["middle2.r",10,11],  ["middle3.r",11,12],
-  ["ring1.r",  13,14],  ["ring2.r",  14,15],  ["ring3.r",  15,16],
-  ["pinky1.r", 17,18],  ["pinky2.r", 18,19],  ["pinky3.r", 19,20],
+  // Metacarpianos (dirección palma → nudillo)
+  ["index1_basel",  0, 5],  ["middle1_basel",  0, 9],
+  ["ring1_basel",   0,13],  ["pinky1_basel",   0,17],
+  ["index1_baser",  0, 5],  ["middle1_baser",  0, 9],
+  ["ring1_baser",   0,13],  ["pinky1_baser",   0,17],
+  // Falanges izquierda
+  ["thumb1l",  1, 2],  ["thumb2l",  2, 3],  ["thumb3l",  3, 4],
+  ["index1l",  5, 6],  ["index2l",  6, 7],  ["index3l",  7, 8],
+  ["middle1l", 9,10],  ["middle2l",10,11],  ["middle3l",11,12],
+  ["ring1l",  13,14],  ["ring2l",  14,15],  ["ring3l",  15,16],
+  ["pinky1l", 17,18],  ["pinky2l", 18,19],  ["pinky3l", 19,20],
+  // Falanges derecha
+  ["thumb1r",  1, 2],  ["thumb2r",  2, 3],  ["thumb3r",  3, 4],
+  ["index1r",  5, 6],  ["index2r",  6, 7],  ["index3r",  7, 8],
+  ["middle1r", 9,10],  ["middle2r",10,11],  ["middle3r",11,12],
+  ["ring1r",  13,14],  ["ring2r",  14,15],  ["ring3r",  15,16],
+  ["pinky1r", 17,18],  ["pinky2r", 18,19],  ["pinky3r", 19,20],
 ];
 
 // Índices de landmarks MediaPipe Pose relevantes para cada brazo
@@ -123,6 +135,14 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 
   scene.add(gltf.scene);
 
+  // Recalcular normales suaves en todas las mallas para eliminar costuras duras
+  // (split normals del GLB causan líneas negras en cuello, hombros, cintura, antebrazos)
+  gltf.scene.traverse(obj => {
+    if (obj.isMesh && obj.geometry) {
+      obj.geometry.computeVertexNormals();
+    }
+  });
+
   // Centrar y escalar usando SOLO la geometría de las mallas visibles
   const meshBox = new THREE.Box3();
   gltf.scene.traverse(obj => { if (obj.isMesh && obj.visible) meshBox.expandByObject(obj); });
@@ -137,28 +157,45 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
   // Forzar actualización de matrices del mundo
   gltf.scene.updateWorldMatrix(true, true);
 
-  // Recopilar todos los huesos y guardar su estado de rest
-  gltf.scene.traverse(obj => {
-    if (!obj.isBone) return;
+  // Helper: registrar un objeto bone en el state
+  function registerBone(obj) {
+    if (state.bones.has(obj.name)) return;
     state.bones.set(obj.name, obj);
-
-    // Quaternion LOCAL en rest → para restaurar en resetPose()
     state.boneRestLocalQ.set(obj.name, obj.quaternion.clone());
-
-    // Quaternion WORLD en rest y dirección Y en world → para retargeting
     const wq = new THREE.Quaternion();
     obj.getWorldQuaternion(wq);
     state.boneRestWorldQ.set(obj.name, wq.clone());
     const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(wq).normalize();
     state.boneRestDir.set(obj.name, dir);
+  }
+
+  // Método 1: traverse estándar (funciona en la mayoría de modelos Rigify/Mixamo)
+  gltf.scene.traverse(obj => {
+    if (obj.isBone) registerBone(obj);
   });
 
+  // Método 2: fallback via SkinnedMesh.skeleton.bones
+  // (necesario para AutoRigPro y otros rigs donde isBone puede ser false)
+  gltf.scene.traverse(obj => {
+    if (obj.isSkinnedMesh && obj.skeleton) {
+      for (const bone of obj.skeleton.bones) registerBone(bone);
+    }
+  });
+
+  console.log("[SignAI] Bones encontrados:", state.bones.size);
+  console.log("[SignAI] Bone names:\n" + [...state.bones.keys()].sort().join("\n"));
+
   const fingerBones = [...state.bones.keys()].filter(n =>
-    /^(thumb|index|middle|ring|pinky)\d+\.[lr]$/.test(n));
+    /^(thumb|index|middle|ring|pinky)\d+[lr]$/.test(n));
   const nDEF = fingerBones.length;
+  console.log("[SignAI] Finger bones:", nDEF, fingerBones);
 
   // Medir rest pose de los brazos para el solver IK
   measureArmRest();
+  console.log("[SignAI] armRest:", JSON.stringify({
+    L_upperL: state.armRest.L_upperL, L_foreL: state.armRest.L_foreL,
+    L_upperR: state.armRest.L_upperR, L_foreR: state.armRest.L_foreR,
+  }));
 
   window._signAI = state;
 
@@ -177,8 +214,8 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 // Captura posiciones y longitudes de los brazos desde la rest pose del GLB.
 function measureArmRest() {
   const g  = state.armRest;
-  const bSL = state.bones.get("arm_stretch.l"), bEL = state.bones.get("forearm_stretch.l"), bWL = state.bones.get("hand.l");
-  const bSR = state.bones.get("arm_stretch.r"), bER = state.bones.get("forearm_stretch.r"), bWR = state.bones.get("hand.r");
+  const bSL = state.bones.get("arm_stretchl"), bEL = state.bones.get("forearm_stretchl"), bWL = state.bones.get("handl");
+  const bSR = state.bones.get("arm_stretchr"), bER = state.bones.get("forearm_stretchr"), bWR = state.bones.get("handr");
   if (!bSL || !bEL || !bWL || !bSR || !bER || !bWR) return;
   const eL = new THREE.Vector3(), wL = new THREE.Vector3();
   const eR = new THREE.Vector3(), wR = new THREE.Vector3();
@@ -197,12 +234,12 @@ const _ikTT    = new THREE.Vector3(); // toTarget (scratch IK)
 const _ikPole  = new THREE.Vector3();
 
 function lmWorldOffset(lm, lmRef, scale, worldRef, out) {
-  // z del landmark es "proporcional al ancho de imagen" — usar el mismo scale xy amplifica
-  // demasiado (delta_z≈0.387 * scale≈3.13 = 1.21, pero el brazo mide 0.52).
-  // Factor empírico 0.12 da extensión razonable (~0.15 u) sin salir del alcance del brazo.
-  // Signo: MediaPipe z disminuye cuando la muñeca está frente al cuerpo (más cerca cámara).
-  // -(delta_z) es positivo cuando la mano está adelante → Three.js +z = hacia la cámara = correcto.
-  const Z_SCALE = 0.40;
+  // Análisis de datos reales (sign 0005, frame 20 — manos juntas):
+  //   Pose wrist z relativo a hombro ≈ -0.40. Con Z_SCALE=0.40 y scale≈3 → 0.48 u forward.
+  //   Pero el brazo mide solo 0.507 u → casi todo el alcance se va en z, las manos
+  //   no pueden llegar al centro del cuerpo en x,y. Reducir a 0.15 libera ~0.47 u de
+  //   alcance en x,y manteniendo presencia 3D para señas con manos hacia la cámara.
+  const Z_SCALE = 0.15;
   return out.set(
     (lm.x - lmRef.x) * scale,
     -(lm.y - lmRef.y) * scale,
@@ -244,25 +281,50 @@ function solveIKElbow(shoulder, target, pole, L1, L2) {
     .addScaledVector(pole, sinA * L1);
 }
 
-function applyArmIK(body) {
+// Scratch para IK de contacto
+const _ikContactMid = new THREE.Vector3();
+const _ikWristL     = new THREE.Vector3();
+const _ikWristR     = new THREE.Vector3();
+
+// Factor de fusión durante CONTACT: 0 = sin efecto, 1 = ambas muñecas al midpoint exacto.
+// 0.8 lleva las muñecas al 80% del camino hacia el punto medio → manos casi juntas.
+const CONTACT_BLEND = 0.8;
+
+function applyArmIK(body, handsArr, frameState) {
   if (!state.armRest.L_upperL) return; // measureArmRest aún no corrió
   const scale = bodyScale(body);
   const g = state.armRest;
 
-  _applyOneArm(body, 11, 13, 15,
-    "arm_stretch.l", "arm_twist.l", "forearm_stretch.l", "forearm_twist.l",
+  // Calcular targets base de muñeca (relativo a su propio hombro — comportamiento natural)
+  lmWorldOffset(body[15], body[11], scale, g.shoulderL, _ikWristL);
+  lmWorldOffset(body[16], body[12], scale, g.shoulderR, _ikWristR);
+
+  // ── CONTACT: fundir ambas muñecas hacia su punto medio ────────────────────
+  // En señas de contacto, las muñecas están a ~0.32 u de separación aún cuando las
+  // palmas se tocan. Aquí las acercamos explícitamente al midpoint cuando el corrector
+  // detecta CONTACT, de modo que las manos se "junten" visualmente en el avatar.
+  if (frameState === 'CONTACT') {
+    _ikContactMid.addVectors(_ikWristL, _ikWristR).multiplyScalar(0.5);
+    _ikWristL.lerp(_ikContactMid, CONTACT_BLEND);
+    _ikWristR.lerp(_ikContactMid, CONTACT_BLEND);
+  }
+
+  _applyOneArm(body, 11, 13, _ikWristL,
+    "arm_stretchl", null, "forearm_stretchl", null,
     g.shoulderL, g.L_upperL, g.L_foreL, scale);
 
-  _applyOneArm(body, 12, 14, 16,
-    "arm_stretch.r", "arm_twist.r", "forearm_stretch.r", "forearm_twist.r",
+  _applyOneArm(body, 12, 14, _ikWristR,
+    "arm_stretchr", null, "forearm_stretchr", null,
     g.shoulderR, g.L_upperR, g.L_foreR, scale);
 }
 
-function _applyOneArm(body, iS, iE, iW,
+function _applyOneArm(body, iS, iE, wristTarget,
     nUA, nUA1, nFA, nFA1, shoulderWorld, L1, L2, scale) {
   if (L1 < 1e-6 || L2 < 1e-6) return;
 
-  lmWorldOffset(body[iW], body[iS], scale, shoulderWorld, _ikWrist);
+  // El target de la muñeca ya viene calculado (y posiblemente ajustado por CONTACT).
+  // El codo se calcula relativo al hombro propio (solo sirve de dirección para el polo).
+  _ikWrist.copy(wristTarget);
   lmWorldOffset(body[iE], body[iS], scale, shoulderWorld, _ikEHint);
 
   // Vector de polo = dirección del codo desde el hombro.
@@ -390,7 +452,7 @@ function applyHandOrientation(bone, rawLms, normalSign) {
   bone.updateMatrixWorld(true);
 
   // Guardar normal de palma para que el loop de dedos proyecte sobre este plano
-  if (bone.name === "hand.l") state.palmNormalL.copy(_hNorm);
+  if (bone.name === "handl") state.palmNormalL.copy(_hNorm);
   else                           state.palmNormalR.copy(_hNorm);
 }
 
@@ -480,7 +542,7 @@ function applyFace(face) {
 function applyFrame(frameData) {
   // ── Brazos: IK de 2 huesos hacia la posición real de la muñeca ───────────
   if (frameData.body) {
-    applyArmIK(frameData.body);
+    applyArmIK(frameData.body, frameData.hands, frameData._corrector_state ?? 'NORMAL');
   }
   // ── Cara: mandíbula y cejas ───────────────────────────────────────────────
   if (frameData.face) {
@@ -493,8 +555,8 @@ function applyFrame(frameData) {
   for (const h of frameData.hands) handsMap[h.hand] = h.landmarks;
 
   // Orientación completa de la muñeca (incluye roll) antes de animar dedos
-  const bHL = state.bones.get("hand.l");
-  const bHR = state.bones.get("hand.r");
+  const bHL = state.bones.get("handl");
+  const bHR = state.bones.get("handr");
   // normalSign +1 para mano izquierda (cross(idx,pnk) apunta hacia la palma),
   // -1 para mano derecha (los dedos aparecen en orden inverso → normal al revés).
   if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
@@ -504,7 +566,7 @@ function applyFrame(frameData) {
     const bone = state.bones.get(boneName);
     if (!bone) continue;
 
-    const side      = boneName.endsWith(".l") ? "Left" : "Right";
+    const side      = boneName.endsWith("l") ? "Left" : "Right";
     const rawLms    = handsMap[side];
     if (!rawLms) continue;
 

@@ -1,0 +1,15 @@
+{
+    "blend_file": "Short Side Part.blend",
+    "hair_systems": {
+        "hair_short_fade": {
+            "length": 1.0,
+            "children_amount": 150,
+            "path_steps": 3
+        },
+        "hair_parted_side": {
+            "length": 1.0,
+            "children_amount": 100,
+            "path_steps": 5
+        }
+    }
+}

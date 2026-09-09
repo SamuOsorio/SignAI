@@ -1,0 +1,14 @@
+{
+    "baking": {
+        "res_body": "512",
+        "res_eyes": "128",
+        "res_teeth": "128",
+        "res_clothes": "512",
+        "export_folder": "",
+        "samples": "4",
+        "file_type": "png",
+        "idx": 0,
+        "total": 0,
+        "progress": 0
+    }
+}
