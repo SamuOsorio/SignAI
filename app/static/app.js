@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 // ── Mapeo landmarks MediaPipe → huesos AutoRigPro ────────────────────────────
 // [nombre_hueso, idx_landmark_inicio, idx_landmark_fin]
@@ -86,10 +87,20 @@ const canvas   = document.getElementById("avatar-canvas");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+// Tone mapping: comprime las altas luces, evita el look "lavado" del IBL.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
 
 const scene  = new THREE.Scene();
 scene.background = new THREE.Color(0x0d0f1a);
 scene.fog = new THREE.Fog(0x0d0f1a, 8, 20);
+
+// Environment map (image-based lighting): sin esto el material glTF por defecto
+// (metalness=1) se ve plano y sin volumen. RoomEnvironment es un IBL sintético
+// que no requiere descargar un HDR.
+const _pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = _pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.45;  // el IBL era la fuente dominante → cuerpo lavado
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
 camera.position.set(0, 1.2, 2.8);
@@ -100,8 +111,9 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 camera.lookAt(controls.target);
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const key = new THREE.DirectionalLight(0xffffff, 1.2);
+// Ambient bajo: con scene.environment activo, un ambient alto aplana la forma.
+scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+const key = new THREE.DirectionalLight(0xffffff, 0.9);
 key.position.set(2, 4, 3);
 scene.add(key);
 const fill = new THREE.DirectionalLight(0x8090ff, 0.4);
@@ -135,12 +147,27 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 
   scene.add(gltf.scene);
 
-  // Recalcular normales suaves en todas las mallas para eliminar costuras duras
-  // (split normals del GLB causan líneas negras en cuello, hombros, cintura, antebrazos)
+  // A/B test de la costura vertical central:
+  //   true  → recalcula normales suaves (tapa costuras oscuras de split normals,
+  //           pero puede crear una arista en la línea de simetría si las mitades
+  //           del mesh no están soldadas).
+  //   false → usa las normales originales del GLB.
+  const RECOMPUTE_NORMALS = false;
+  if (RECOMPUTE_NORMALS) {
+    gltf.scene.traverse(obj => {
+      if (obj.isMesh && obj.geometry) obj.geometry.computeVertexNormals();
+    });
+  }
+
+  // El GLB no trae materiales ni texturas: GLTFLoader asigna un material por
+  // defecto con metalness=1 que se ve plano. Lo reemplazamos por una piel mate.
+  const skinMat = new THREE.MeshStandardMaterial({
+    color: 0xa9785d,
+    roughness: 0.85,
+    metalness: 0.0,
+  });
   gltf.scene.traverse(obj => {
-    if (obj.isMesh && obj.geometry) {
-      obj.geometry.computeVertexNormals();
-    }
+    if (obj.isMesh) obj.material = skinMat;
   });
 
   // Centrar y escalar usando SOLO la geometría de las mallas visibles

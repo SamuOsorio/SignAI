@@ -1,8 +1,9 @@
 # Avatar 3D — Especificación técnica del rig y animación
 
-> Última actualización: 2026-09-08  
+> Última actualización: 2026-09-09  
 > Rig activo: **AutoRigPro** (`CopiaModelo.glb`) — rama `feature/nuevo-avatar-copiamodelo`  
-> Rig anterior: Rigify (`Prueba2.glb`, ~50 MB) — en archivo, rama `master`
+> Rig anterior: Rigify (`Prueba2.glb`, ~50 MB) — en archivo, rama `master`  
+> Shading/material: ver change `avatar-shading-material` (rama `feature/avatar-material-shading`)
 
 ---
 
@@ -25,8 +26,10 @@
 |---------|--------|
 | Rig | AutoRigPro (Blender) |
 | Nombres de huesos | Sin puntos en Three.js (ver sección siguiente) |
-| Normales | `computeVertexNormals()` aplicado en carga (elimina costuras oscuras) |
-| Textura | Sin textura — maniquí gris |
+| Materiales / texturas | **0 en el GLB** (`material: null`, sin imágenes; `COLOR_0` blanco plano). Skinning de piernas sano (pesos normalizados). Malla: 1 sola, low-poly en piernas (pelvis/muslo 380–1920 verts vs cabeza ~3870) |
+| Material en runtime | `MeshStandardMaterial {color:0xa9785d, roughness:0.85, metalness:0}` aplicado en `app.js` a todas las mallas (reemplaza el default metálico de GLTFLoader) |
+| Iluminación | `scene.environment` = `RoomEnvironment` vía `PMREMGenerator`, `environmentIntensity 0.45`; `ACESFilmicToneMapping` exp `0.85`; `AmbientLight 0.2`, key `0.9`, fill `0.4` |
+| Normales | Se usan las del GLB. `computeVertexNormals()` detrás de `const RECOMPUTE_NORMALS = false` — recalcular creaba costura vertical en el plano de simetría (mirror sin soldar) |
 | Dedos animados | ✅ 30 huesos (5 dedos × 3 falanges × 2 lados) |
 | Twist bones | ❌ NO se animan (causarían doble rotación) |
 
@@ -233,8 +236,9 @@ if old_w < 1e-5:
 | # | Problema | Causa probable | Prioridad |
 |---|---------|----------------|-----------|
 | P1 | Dedos en "claw" durante CONTACT | palmNorm incorrecto cuando palma muy rotada en oclusión | Alta |
-| P2 | Avatar sin textura (maniquí gris) | No hay material/textura en mesh | Media |
-| P3 | Ceja derecha casi estática | Weight painting asimétrico (si aplica al nuevo rig) | Baja |
+| P2 | Avatar sin textura de piel (color plano) | GLB sin material/textura; mitigado con material mate + IBL en runtime (change `avatar-shading-material`). Textura UV real requiere re-export desde Blender | Baja |
+| P3 | Piernas low-poly (poco detalle) | Malla original con baja resolución en pelvis/piernas; solo se corrige re-exportando con subdivisión | Baja |
+| P4 | Ceja derecha casi estática | Weight painting asimétrico (si aplica al nuevo rig) | Baja |
 
 ### P1 — Fix tentativo para dedos durante CONTACT
 ```js

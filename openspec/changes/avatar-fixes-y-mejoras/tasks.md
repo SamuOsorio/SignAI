@@ -7,6 +7,10 @@
 
 ## 2. Avatar — mesh y textura (Blender)
 
+> Parcialmente mitigado en runtime por el change `avatar-shading-material` (2026-09-09):
+> material mate + `RoomEnvironment` IBL + tone mapping en `app.js`, sin re-exportar el GLB.
+> Lo de abajo sigue aplicando para **textura de piel UV real** y **más resolución de malla**.
+
 - [ ] 2.1 Abrir `blender/PruebaBlender2.blend` y verificar si el mesh tiene material/textura asignada
 - [ ] 2.2 Seleccionar o crear un mesh de mayor calidad con textura de piel (conservando el rig Rigify actual)
 - [ ] 2.3 Corregir vertex weights de `DEF-browTR` en Weight Paint (actualmente solo 4 vértices vs 32 de la ceja izquierda)
