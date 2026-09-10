@@ -3,28 +3,49 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
-// ── Mapeo landmarks MediaPipe → huesos AutoRigPro ────────────────────────────
-// [nombre_hueso, idx_landmark_inicio, idx_landmark_fin]
-// Convención AutoRigPro: thumb1/2/3, index1/2/3, middle1/2/3, ring1/2/3, pinky1/2/3
-// NOTA: Three.js elimina los puntos de los nombres (arm_stretch.l → arm_stretchl)
-// [nombre_hueso, idx_lm_inicio, idx_lm_fin]
-// Los metacarpianos (index1_base / … / pinky1_base) NO se animan: sus pesos ya se
-// transfirieron a hand.l/r en Blender (aportan poco al mesh) y orientarlos desde
-// wrist→nudillo, que es ruidoso, abría la palma en abanico. (bundle dedos, punto A)
-const BONE_MAP = [
-  // Falanges izquierda
-  ["thumb1l",  1, 2],  ["thumb2l",  2, 3],  ["thumb3l",  3, 4],
-  ["index1l",  5, 6],  ["index2l",  6, 7],  ["index3l",  7, 8],
-  ["middle1l", 9,10],  ["middle2l",10,11],  ["middle3l",11,12],
-  ["ring1l",  13,14],  ["ring2l",  14,15],  ["ring3l",  15,16],
-  ["pinky1l", 17,18],  ["pinky2l", 18,19],  ["pinky3l", 19,20],
-  // Falanges derecha
-  ["thumb1r",  1, 2],  ["thumb2r",  2, 3],  ["thumb3r",  3, 4],
-  ["index1r",  5, 6],  ["index2r",  6, 7],  ["index3r",  7, 8],
-  ["middle1r", 9,10],  ["middle2r",10,11],  ["middle3r",11,12],
-  ["ring1r",  13,14],  ["ring2r",  14,15],  ["ring3r",  15,16],
-  ["pinky1r", 17,18],  ["pinky2r", 18,19],  ["pinky3r", 19,20],
-];
+// ── Dedos: landmarks MediaPipe Hands por familia ────────────────────────────
+// [MCP, PIP, DIP, TIP]. Las falanges 1/2/3 de cada familia mapean a los huesos
+// AutoRigPro thumb1/2/3, index1/2/3, … (Three.js quita los puntos: index1.l → index1l).
+// Los metacarpianos (*1_base*) NO se animan: sus pesos ya viven en hand.l/r y
+// orientarlos desde wrist→nudillo abría la palma en abanico. (bundle dedos, punto A)
+const FINGER_LM = {
+  thumb:  [1,  2,  3,  4],
+  index:  [5,  6,  7,  8],
+  middle: [9, 10, 11, 12],
+  ring:   [13, 14, 15, 16],
+  pinky:  [17, 18, 19, 20],
+};
+
+// Familias tratadas como bisagra pura: flexión en 1 solo eje, sin torsión ni
+// abducción. El pulgar queda fuera — su articulación es un sillar, no una bisagra,
+// y el eje derivado de la normal de palma no lo modela → sigue en retargeting libre.
+const HINGE_FINGERS = ["index", "middle", "ring", "pinky"];
+
+// Rango de flexión por falange: 0 = recta … ~100°. Se permite algo de
+// hiperextensión (−8°) para que la mano relajada no se vea agarrotada.
+const FLEX_MIN_RAD = -0.14;
+const FLEX_MAX_RAD =  1.75;
+
+// Ganancia sobre el ángulo de flexión 2D antes del clamp. El giro medido en el
+// plano de imagen subestima la flexión real por escorzo (la falange se acorta al
+// doblarse hacia/desde la cámara) → 1.0 deja los dedos a medio cerrar. >1 compensa.
+const FLEX_GAIN = 1.25;
+
+// La falange distal (DIP) tiene el segmento más corto y ruidoso → suele caer bajo
+// el deadzone y no llega a cerrar ("no termina de flexionar la punta"). Cuando su
+// señal propia no es fiable se deriva de la falange media (PIP) por acoplamiento
+// tendinoso: DIP ≈ 2/3 · PIP.
+const DIP_PIP_COUPLING = 0.66;
+
+// Override del signo del giro de flexión por mano:
+//   0  → automático (se deduce del rig: hacia qué lado se curva el pulgar = palmar)
+//   ±1 → forzar ese signo (usar solo si el automático se equivoca; ver consola)
+// Los esqueletos de las dos manos están espejados, por eso se resuelve por mano.
+const FINGER_FLEX_SIGN = { Left: 0, Right: 0 };
+
+// true  → bisagra anatómica (flexión 1 eje por falange).
+// false → retargeting libre anterior (setFromUnitVectors por segmento), para A/B.
+const FINGER_HINGE = true;
 
 // Índices de landmarks MediaPipe Pose relevantes para cada brazo
 // 11=hombro_izq, 12=hombro_der, 13=codo_izq, 14=codo_der
@@ -54,6 +75,7 @@ const state = {
   boneRestLocalQ: new Map(),  // name → Quaternion local en rest (para resetPose)
   boneRestWorldQ: new Map(),  // name → Quaternion world en rest (para retargeting)
   boneRestDir:   new Map(),   // name → Vector3 dirección Y en world en rest
+  boneFlexAxis:  new Map(),   // name → Vector3 eje bisagra en frame local (falanges)
   frames: [],
   fps: 30,
   frameIdx: 0,
@@ -63,10 +85,10 @@ const state = {
   // Fracción [0,1] que avanza hacia el quaternion objetivo cada tick de rAF.
   // 0.12 ≈ convergencia en ~6 frames a 60fps (~100ms), buen balance suavidad/lag.
   smoothAlpha: 0.12,
-  // Suavizado propio de las falanges: mucho más bajo que el de brazos porque los
-  // segmentos de dedo son ~5-9 px en imagen → señal ≈ ruido aún tras el filtro
-  // temporal del server. (bundle dedos, punto C)
-  fingerAlpha: 0.06,
+  // Suavizado propio de las falanges. Con el retargeting libre (jittery) valía 0.06;
+  // la bisagra de 1 eje + clamp es mucho más estable → se puede subir sin temblor
+  // y así los dedos no se quedan "rígidos" a medio converger. (subir → más responsivo)
+  fingerAlpha: 0.18,
   // Deadzone adaptativo: se ignora la rotación de una falange cuando su vector de
   // segmento es más corto que fingerDeadzone × (largo de palma wrist→MCP medio).
   // Evita rotar hacia ruido puro cuando el dedo casi no se mueve. (bundle dedos, punto B)
@@ -221,6 +243,9 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
     L_upperL: state.armRest.L_upperL, L_foreL: state.armRest.L_foreL,
     L_upperR: state.armRest.L_upperR, L_foreR: state.armRest.L_foreR,
   }));
+
+  // Derivar el eje de bisagra local de cada falange (flexión 1 eje)
+  measureFingerHinges();
 
   window._signAI = state;
 
@@ -428,6 +453,12 @@ const _hSide = new THREE.Vector3();
 const _hMat  = new THREE.Matrix4();
 const _hQ    = new THREE.Quaternion();
 
+// Scratch para la bisagra de falanges
+const _flexDelta   = new THREE.Quaternion();
+const _flexTargetL = new THREE.Quaternion();
+const _segP        = new THREE.Vector3();
+const _segC        = new THREE.Vector3();
+
 function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
   const restDir    = state.boneRestDir.get(bone.name);
   const restWorldQ = state.boneRestWorldQ.get(bone.name);
@@ -447,6 +478,93 @@ function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
     _tLQ.copy(_tWQ);
   }
   bone.quaternion.slerp(_tLQ, alpha);
+  bone.updateMatrixWorld(true);
+}
+
+// ── Bisagra anatómica por falange ────────────────────────────────────────────
+
+// Fija un vector al eje cardinal (±X/±Y/±Z) más cercano. Limpia el eje bisagra
+// de residuos oblicuos → la falange gira sobre 1 solo eje exacto.
+function snapToCardinal(v) {
+  const ax = Math.abs(v.x), ay = Math.abs(v.y), az = Math.abs(v.z);
+  if (ax >= ay && ax >= az)      v.set(Math.sign(v.x) || 1, 0, 0);
+  else if (ay >= ax && ay >= az) v.set(0, Math.sign(v.y) || 1, 0);
+  else                           v.set(0, 0, Math.sign(v.z) || 1);
+  return v;
+}
+
+// Deriva, una vez cargado el rig, el eje de bisagra local de cada falange de
+// index/middle/ring/pinky. El eje es ⊥ al eje largo del dedo y ⊥ a la normal de
+// la palma (rest pose): girar +ángulo sobre él flexiona la falange hacia la palma.
+function measureFingerHinges() {
+  state.boneFlexAxis.clear();
+  for (const side of ["l", "r"]) {
+    const wristB = state.bones.get("hand" + side);
+    const idxB   = state.bones.get("index1" + side);
+    const pnkB   = state.bones.get("pinky1" + side);
+    if (!wristB || !idxB || !pnkB) continue;
+
+    const w = new THREE.Vector3(), i = new THREE.Vector3(), p = new THREE.Vector3();
+    wristB.getWorldPosition(w); idxB.getWorldPosition(i); pnkB.getWorldPosition(p);
+
+    // Normal del plano de la palma en world (wrist→index × wrist→pinky). Su signo
+    // es arbitrario (dorsal o palmar); girar +ángulo sobre hinge = restDir × palmN
+    // hace que la punta de la falange se mueva hacia +palmN.
+    const palmN = new THREE.Vector3()
+      .crossVectors(i.clone().sub(w), p.clone().sub(w))
+      .normalize();
+    if (palmN.lengthSq() < 1e-10) continue;
+
+    // ¿Hacia qué lado del plano de palma está +palmN, dorsal o palmar? El pulgar
+    // se curva hacia la palma → la dirección thumb1→thumb3 tiene componente palmar.
+    const tb = new THREE.Vector3(), tt = new THREE.Vector3();
+    const tbB = state.bones.get("thumb1" + side), ttB = state.bones.get("thumb3" + side);
+    let auto = 1, pc = 0;
+    if (tbB && ttB) {
+      tbB.getWorldPosition(tb); ttB.getWorldPosition(tt);
+      pc = palmN.dot(tt.sub(tb));       // >0 → +palmN es palmar ; <0 → es dorsal
+      auto = pc >= 0 ? 1 : -1;
+    }
+    const override = side === "l" ? FINGER_FLEX_SIGN.Left : FINGER_FLEX_SIGN.Right;
+    const sign = override !== 0 ? override : auto;
+
+    for (const fam of HINGE_FINGERS) {
+      for (let k = 1; k <= 3; k++) {
+        const name    = `${fam}${k}${side}`;
+        const restWQ  = state.boneRestWorldQ.get(name);
+        const restDir = state.boneRestDir.get(name); // eje largo (Y local) en world
+        if (!state.bones.has(name) || !restWQ || !restDir) continue;
+
+        const hingeW = new THREE.Vector3()
+          .crossVectors(restDir, palmN)
+          .multiplyScalar(sign);
+        if (hingeW.lengthSq() < 1e-10) continue;
+        hingeW.normalize();
+
+        // A frame local del hueso y snap a eje cardinal → bisagra de 1 eje exacto.
+        const hingeL = hingeW.applyQuaternion(restWQ.clone().invert());
+        snapToCardinal(hingeL);
+        state.boneFlexAxis.set(name, hingeL);
+      }
+    }
+
+    console.log(`[SignAI] hinge ${side}: sign=${sign} (auto=${auto}, pc=${pc.toFixed(3)}, override=${override})`);
+  }
+  console.log("[SignAI] Ejes bisagra de falange:", state.boneFlexAxis.size);
+}
+
+// Flexiona una falange 'angle' rad sobre su eje bisagra local, partiendo del rest.
+// Garantiza: 1 solo eje, sin torsión, rango clampeado. Suavizado por slerp.
+function flexFinger(bone, angle, alpha = state.fingerAlpha) {
+  const axis  = state.boneFlexAxis.get(bone.name);
+  const restL = state.boneRestLocalQ.get(bone.name);
+  if (!axis || !restL) return;
+
+  const a = THREE.MathUtils.clamp(angle, FLEX_MIN_RAD, FLEX_MAX_RAD);
+  _flexDelta.setFromAxisAngle(axis, a);
+  _flexTargetL.multiplyQuaternions(restL, _flexDelta); // rest ∘ flexión (local)
+
+  bone.quaternion.slerp(_flexTargetL, alpha);
   bone.updateMatrixWorld(true);
 }
 
@@ -624,24 +742,53 @@ function applyFrame(frameData) {
     if (lm) handSpan[s] = mpToThree(lm[9], lm[0]).length();
   }
 
-  for (const [boneName, lmStart, lmEnd] of BONE_MAP) {
-    const bone = state.bones.get(boneName);
-    if (!bone) continue;
+  // ── Dedos: bisagra anatómica por falange ────────────────────────────────
+  // Cada falange de index/middle/ring/pinky gira sobre UN eje (flexión 0–~100°,
+  // sin torsión ni abducción). El ángulo es el giro 2D en el plano de imagen
+  // entre la falange previa y la actual — buen proxy de la flexión total cuando
+  // la mano mira a cámara; se subestima con el dedo en escorzo (lo compensa FLEX_GAIN).
+  for (const [fam, lm] of Object.entries(FINGER_LM)) {
+    for (const side of ["Left", "Right"]) {
+      const rawLms = handsMap[side];
+      if (!rawLms) continue;
+      const sfx  = side === "Left" ? "l" : "r";
+      const span = handSpan[side] ?? 0;
+      const hinge = FINGER_HINGE && fam !== "thumb";
 
-    const side      = boneName.endsWith("l") ? "Left" : "Right";
-    const rawLms    = handsMap[side];
-    if (!rawLms) continue;
+      // Paso 1: ángulo de flexión y fiabilidad de las 3 falanges.
+      // bend[k] = giro 2D (falange previa → actual) × FLEX_GAIN ; rel[k] = señal fiable.
+      const bend = [0, 0, 0], rel = [false, false, false], seg = [0, 0, 0];
+      for (let k = 1; k <= 3; k++) {
+        const cA = rawLms[lm[k - 1]], cB = rawLms[lm[k]];
+        const pA = k === 1 ? rawLms[0]     : rawLms[lm[k - 2]];
+        const pB = k === 1 ? rawLms[lm[0]] : rawLms[lm[k - 1]];
+        _segC.set(cB.x - cA.x, -(cB.y - cA.y), 0);
+        _segP.set(pB.x - pA.x, -(pB.y - pA.y), 0);
+        seg[k - 1]  = _segC.clone();
+        // Deadzone adaptativo (punto B): falange más corta que el piso de ruido
+        // (dedo en escorzo, mano colgando) o segmento padre degenerado → no fiable.
+        rel[k - 1]  = _segC.length() >= span * state.fingerDeadzone && _segP.lengthSq() >= 1e-10;
+        bend[k - 1] = rel[k - 1] ? _segP.angleTo(_segC) * FLEX_GAIN : 0;
+      }
+      // La distal sigue a la media si su propia señal no llega (acoplamiento tendinoso).
+      if (hinge && !rel[2] && rel[1]) { bend[2] = bend[1] * DIP_PIP_COUPLING; rel[2] = true; }
 
-    const wrist     = rawLms[0];
-    const dir = mpToThree(rawLms[lmEnd], wrist).sub(mpToThree(rawLms[lmStart], wrist));
+      // Paso 2: aplicar a cada hueso. Señal no fiable → relajar hacia el rest en
+      // vez de congelar la última pose (si no, la mano queda "en garra" al bajar).
+      for (let k = 1; k <= 3; k++) {
+        const bone = state.bones.get(`${fam}${k}${sfx}`);
+        if (!bone) continue;
 
-    // Deadzone adaptativo (punto B): segmento por debajo del piso de ruido → no rotar.
-    if (dir.length() < (handSpan[side] ?? 0) * state.fingerDeadzone) continue;
-
-    // Sin proyección al plano de la palma: la normal de palma se calcula con
-    // cross() de dos vectores casi coplanares → dirección aleatoria entre frames,
-    // así que proyectar metía ruido en vez de quitarlo. (bundle dedos, punto D)
-    rotateBone(bone, dir, state.fingerAlpha);
+        if (!rel[k - 1]) {
+          const restL = state.boneRestLocalQ.get(bone.name);
+          if (restL) { bone.quaternion.slerp(restL, state.fingerAlpha * 0.5); bone.updateMatrixWorld(true); }
+        } else if (hinge) {
+          flexFinger(bone, bend[k - 1], state.fingerAlpha);
+        } else {
+          rotateBone(bone, seg[k - 1], state.fingerAlpha);   // pulgar / A-B libre
+        }
+      }
+    }
   }
 }
 

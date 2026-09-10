@@ -3,7 +3,8 @@
 > Última actualización: 2026-09-09  
 > Rig activo: **AutoRigPro** (`CopiaModelo.glb`) — rama `feature/nuevo-avatar-copiamodelo`  
 > Rig anterior: Rigify (`Prueba2.glb`, ~50 MB) — en archivo, rama `master`  
-> Shading/material: ver change `avatar-shading-material` (rama `feature/avatar-material-shading`)
+> Shading/material: ver change `avatar-shading-material` (rama `feature/avatar-material-shading`)  
+> Bisagra de falanges: ver change `avatar-bisagra-falange` (rama `feature/avatar-bisagra-falange`)
 
 ---
 
@@ -65,31 +66,55 @@ _applyOneArm(body, 11, 13, 15,
   "forearm_stretchl", null, ...) // null = no animar forearm_twistl
 ```
 
-### Huesos de dedos (BONE_MAP en app.js)
+### Huesos de dedos (`FINGER_LM` en app.js — antes `BONE_MAP`)
 ```
-Falanges (proximal → distal por dedo) — 30 huesos:
-  thumb1l[1→2]  thumb2l[2→3]  thumb3l[3→4]
-  index1l[5→6]  index2l[6→7]  index3l[7→8]
-  middle1l[9→10] middle2l[10→11] middle3l[11→12]
-  ring1l[13→14]  ring2l[14→15]  ring3l[15→16]
-  pinky1l[17→18] pinky2l[18→19] pinky3l[19→20]
-  (ídem con "r")
+FINGER_LM = { thumb:[1,2,3,4], index:[5,6,7,8], middle:[9,10,11,12],
+              ring:[13,14,15,16], pinky:[17,18,19,20] }   // [MCP,PIP,DIP,TIP]
+Falanges 1/2/3 de cada familia → thumb1l/2l/3l … pinky1l/2l/3l (ídem "r"). 30 huesos.
+HINGE_FINGERS = index/middle/ring/pinky → bisagra de 1 eje (ver abajo).
+thumb → sigue en rotateBone libre (articulación de sillar, no bisagra).
 
-Metacarpianos (index1_base…pinky1_base): en el rig pero NO en BONE_MAP.
+Metacarpianos (index1_base…pinky1_base): en el rig pero NO se animan.
 Se quitaron (change avatar-finger-bundle-arm-ik): orientarlos desde wrist→nudillo
 abría la palma en abanico; sus pesos ya están en hand.l/r.
 ```
 
-### Retargeting de falanges (loop en `applyFrame`, change `avatar-finger-bundle-arm-ik`)
+### Retargeting de falanges — bisagra anatómica (change `avatar-bisagra-falange`)
+
+Cada falange de index/middle/ring/pinky gira sobre **un solo eje** (flexión, sin torsión
+ni abducción). Reemplaza el `rotateBone(dir)` libre anterior (`setFromUnitVectors` en 3D →
+eje arbitrario → dedos torcidos con el ruido).
+
+**Eje de bisagra** (`measureFingerHinges()`, una vez al cargar el GLB):
 ```
-dir = mpToThree(lmEnd, wrist) − mpToThree(lmStart, wrist)   // z ya suprimido
-// Deadzone adaptativo: si |dir| < handSpan · fingerDeadzone → no rotar este frame
-//   handSpan = |mpToThree(lm9, lm0)| (largo de palma)
-//   fingerDeadzone = 0.12
-rotateBone(bone, dir, state.fingerAlpha)                    // fingerAlpha = 0.06
+palmN  = normalize((index1 − wrist) × (pinky1 − wrist))   // world, rest pose
+hingeW = normalize(restDir × palmN) · sign                // ⊥ eje largo del dedo y ⊥ palma
+hingeL = snapToCardinal(hingeW aplicado en frame local del hueso)  // ±X/±Y/±Z exacto
+state.boneFlexAxis[name] = hingeL     // index1.axisLocal = (−1,0,0) en ambas manos
 ```
-Sin proyección al plano de palma (la normal `cross()` era ruido en mano casi plana).
-`applyHandOrientation` escala el `z` crudo por `Z_HAND = 0.3` (no lo anula: mataría el roll).
+`sign` automático: `pc = palmN · (thumb1 → thumb3)`; `pc < 0` → +palmN es dorsal → `sign = −1`.
+Da `l = −1`, `r = +1` (esqueletos espejados). Override: `FINGER_FLEX_SIGN {Left,Right}`
+(0 = auto, ±1 = forzar).
+
+**Ángulo** (loop de dedos en `applyFrame`, dos pasos — medir las 3 falanges, luego aplicar):
+```
+bend = _segP.angleTo(_segC) · FLEX_GAIN     // giro 2D previa→actual ; FLEX_GAIN = 1.25
+                                            // (compensa el escorzo que subestima la flexión)
+// falange proximal: _segP = wrist → MCP
+// DIP: si su segmento no es fiable → bend[DIP] = bend[PIP] · DIP_PIP_COUPLING (0.66)
+flexFinger(bone, bend, state.fingerAlpha):
+  a = clamp(bend, FLEX_MIN_RAD −0.14, FLEX_MAX_RAD 1.75)
+  bone.quaternion.slerp(restLocalQ ∘ axisAngle(boneFlexAxis, a), fingerAlpha)  // 0.18
+```
+
+**Deadzone adaptativo** (`state.fingerDeadzone = 0.12`): `|_segC| < handSpan · fingerDeadzone`
+(`handSpan = |mpToThree(lm9, lm0)|`) o segmento padre degenerado → señal NO fiable →
+**relajar** `slerp(restLocalQ, fingerAlpha·0.5)` (antes: `continue` → congelaba → mano "en
+garra" al bajar a reposo).
+
+`rotateBone` queda **intacto** (brazos, cara, roll de muñeca, pulgar). El pulgar y
+`FINGER_HINGE = false` (A/B) usan `rotateBone(seg, fingerAlpha)` con el segmento crudo.
+`applyHandOrientation` sigue escalando el `z` crudo por `Z_HAND = 0.3`.
 
 ### Medidas del rig (verificadas en runtime)
 ```
@@ -251,8 +276,9 @@ if old_w < 1e-5:
 
 | Parte | Estado | Implementación |
 |-------|--------|----------------|
-| Dedos (30 huesos) | ✅ Funciona | BONE_MAP + rotateBone(dir, fingerAlpha=0.06) + deadzone adaptativo; SIN proyección palmNorm |
-| Metacarpianos (4 por mano) | ❌ No animar | Quitados de BONE_MAP (abrían la palma en abanico) |
+| Dedos index/middle/ring/pinky (24 huesos) | ✅ Funciona | Bisagra anatómica de 1 eje: `flexFinger` (ángulo 2D × FLEX_GAIN, clamp, axisAngle sobre `boneFlexAxis`) + acoplamiento DIP→PIP + deadzone que relaja a rest. fingerAlpha=0.18 (change `avatar-bisagra-falange`) |
+| Pulgar (6 huesos) | ✅ Funciona | `rotateBone(seg, fingerAlpha)` libre — articulación de sillar, no bisagra |
+| Metacarpianos (4 por mano) | ❌ No animar | Quitados de FINGER_LM (abrían la palma en abanico) |
 | Muñeca roll (palma) | ✅ Funciona | applyHandOrientation() con cross(idx,pnk), z crudo × Z_HAND=0.3 |
 | Codo | ✅ Funciona | IK 2-huesos (solveIKElbow) + ELBOW_OUT con gate de altura + anti-clip torso |
 | Hombro (arm_stretch) | ✅ Funciona | IK 2-huesos. El hueso `shoulder` NO se anima → tears de pectoral con brazo muy alto (ver P1b) |
@@ -273,7 +299,7 @@ if old_w < 1e-5:
 
 | # | Problema | Causa probable | Prioridad |
 |---|---------|----------------|-----------|
-| P1 | Falanges: rotación de arco más corto (sin bisagra) → se tuercen/abren de costado con ruido | `rotateBone` usa `setFromUnitVectors` en 3D. Mitigado (filtro One-Euro + fingerAlpha + deadzone); fix real = bisagra anatómica por falange | Media |
+| ~~P1~~ | ~~Falanges: rotación de arco más corto (sin bisagra) → se tuercen/abren de costado~~ | **Resuelto** en change `avatar-bisagra-falange`: `flexFinger` gira cada falange sobre un solo eje (`boneFlexAxis`), rango acotado, sin torsión. `rotateBone` con `setFromUnitVectors` solo se usa ya para brazos/cara/muñeca/pulgar | — |
 | P1b | "Se abre el pecho" al subir mucho el brazo | Artefacto de skinning: pesos flojos de hombro/pectoral (ver `copiamodelo-rig-ik-contacto` §2/§8) + el hueso `shoulder` no se anima → todo el giro va a `arm_stretch`. Mitigado al no forzar codo-afuera con brazo alto; fix = weight painting o animar `shoulder` | Media |
 | P2 | Avatar sin textura de piel (color plano) | GLB sin material/textura; mitigado con material mate + IBL en runtime (change `avatar-shading-material`). Textura UV real requiere re-export desde Blender | Baja |
 | P3 | Piernas low-poly (poco detalle) | Malla original con baja resolución en pelvis/piernas; solo se corrige re-exportando con subdivisión | Baja |
@@ -282,6 +308,9 @@ if old_w < 1e-5:
 ---
 
 ## Retargeting — fórmula correcta
+
+> Usado por brazos, cara, roll de muñeca y pulgar. Las falanges index/middle/ring/pinky
+> ya NO usan esto — ver `flexFinger` (bisagra de 1 eje) más arriba.
 
 ```js
 // rotateBone(bone, targetDir, alpha = state.smoothAlpha)
