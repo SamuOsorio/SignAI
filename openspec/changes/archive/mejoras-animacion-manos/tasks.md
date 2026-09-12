@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 ## 1. Fixes rápidos (app.js)
 
 - [x] 1.1 Hardcodear `smoothAlpha = 0.12` y eliminar el slider de suavizado de la UI

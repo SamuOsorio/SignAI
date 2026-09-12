@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 ## 1. Fixes de código (app.js + server.py)
 
 - [x] 1.1 ~~Corregir nombres de huesos de cejas~~ — CANCELADO: los nombres reales en el GLB son `DEF-browTL`/`DEF-browTR` (sin puntos). El código original era correcto. Verificado con `[..._signAI.bones.keys()]`.

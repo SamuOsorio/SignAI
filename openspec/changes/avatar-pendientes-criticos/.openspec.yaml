@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-12
+# Change de consolidación/tracking, no introduce comportamiento nuevo por sí mismo.
+# La spec viva (specs/avatar/spec.md) se actualiza inline en cada fix puntual, como el
+# resto de changes del repo.
+skip_specs: true

@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 # Bundle de dedos + ajustes de IK de brazo (menos deformación, brazos despegados del torso)
 
 > Sesión: 2026-09-09

@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 # Filtro temporal One-Euro para landmarks de mano (fix "dedos y muñeca tiemblan")
 
 > Sesión: 2026-09-09

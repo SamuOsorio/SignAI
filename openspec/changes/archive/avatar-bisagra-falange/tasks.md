@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 # Bisagra anatómica por falange (flexión 1 eje, sin torsión ni abducción)
 
 > Sesión: 2026-09-09

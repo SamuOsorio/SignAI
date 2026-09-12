@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 # Avatar — Material, IBL y tone mapping (fix "sin textura" / tren inferior sin forma)
 
 > Sesión: 2026-09-09

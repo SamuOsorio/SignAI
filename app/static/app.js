@@ -311,6 +311,25 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
     }
   };
 
+  // window._stepTo(idx) — aplica un frame puntual sin depender del loop de
+  // rAF (que Chrome pausa en pestañas en background/automatizadas). Solo
+  // debug, mismo espíritu que _dumpArm: útil para inspección determinística.
+  window._stepTo = function (idx) {
+    state.frameIdx = idx;
+    const frame = state.frames[Math.floor(idx)];
+    if (!frame) { console.log("frame fuera de rango"); return; }
+    applyFrame(frame);
+  };
+
+  // window._stepFrom0(idx) — como _stepTo, pero re-ejecuta desde el frame 0
+  // (tras resetPose) para que el suavizado (slerp) llegue a `idx` con el
+  // mismo historial de convergencia que tendría en reproducción normal, en
+  // vez de partir de donde haya quedado el estado actual.
+  window._stepFrom0 = function (idx) {
+    resetPose();
+    for (let i = 0; i <= idx; i++) window._stepTo(i);
+  };
+
   setStatus(`Avatar listo — ${state.bones.size} huesos (${nDEF} dedos)`, "ok");
   document.getElementById("avatar-meta").textContent = `${state.bones.size} huesos · ${nDEF} dedos`;
 
@@ -545,6 +564,7 @@ const _hIdxV = new THREE.Vector3();
 const _hPnkV = new THREE.Vector3();
 const _hNorm = new THREE.Vector3();
 const _hSide = new THREE.Vector3();
+const _hCross = new THREE.Vector3(); // ángulo con signo del roll (ver applyHandOrientation paso 2)
 const _hMat  = new THREE.Matrix4();
 const _hQ    = new THREE.Quaternion();
 
@@ -684,22 +704,19 @@ function applyHandOrientation(bone, rawLms, normalSign, contactMode = false) {
   const w = rawLms[0];
 
   // ── Paso 1: alinear eje Y del hueso (hacia dónde "apunta" la mano) ──────
-  if (contactMode && bone.parent) {
-    // Durante CONTACT, rawLms[9] (dedo medio) viene de la pose PRE-contacto
-    // congelada — solo trasladada para seguir la muñeca (_rebase_to_wrist en
-    // hand_corrector.py), nunca re-orientada. Usarla aquí deja la mano
-    // "mirando" para siempre hacia donde miraba justo antes del contacto —
-    // a menudo una pose de transición (ej. seña 0018: queda con la palma
-    // hacia arriba en vez del índice apuntando a cámara). El antebrazo, en
-    // cambio, se sigue orientando en vivo por IK durante todo el CONTACT (no
-    // depende de landmarks de mano) → se usa su eje Y como proxy de "hacia
-    // dónde apunta la mano" (sin flexión propia de muñeca, pero sigue al
-    // brazo real en vez de quedar pegada a la pose vieja).
+  // rawLms[9] (dedo medio) ya NO es necesariamente una pose vieja congelada
+  // en CONTACT: hand_corrector.py decide dedo por dedo (ver _contact_hand) —
+  // "middle" (familia que incluye el landmark 9) es dato crudo real cuando
+  // MediaPipe lo sigue viendo, y solo se sostiene el último bueno conocido
+  // si ese frame puntual no es plausible. Se usa igual que en NORMAL.
+  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * Z_HAND);
+  if (_hUp.lengthSq() < 1e-8) {
+    if (!(contactMode && bone.parent)) return;
+    // Dato degenerado (mano recién detectada, sin referencia aún) → eje Y
+    // del antebrazo como respaldo (mismo proxy que se usaba siempre antes).
     bone.parent.getWorldQuaternion(_hQ);
     _hUp.set(0, 1, 0).applyQuaternion(_hQ);
   } else {
-    _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * Z_HAND);
-    if (_hUp.lengthSq() < 1e-8) return;
     _hUp.normalize();
   }
   rotateBone(bone, _hUp); // slerp incluido
@@ -722,8 +739,25 @@ function applyHandOrientation(bone, rawLms, normalSign, contactMode = false) {
   _hSide.addScaledVector(_hUp, -_hSide.dot(_hUp)).normalize();
   if (_hSide.lengthSq() < 1e-8) return;
 
-  // Delta de roll: rotar el Z actual hacia la normal objetivo
-  _dQ.setFromUnitVectors(_hSide, _hNorm);
+  // Delta de roll: ángulo CON SIGNO entre _hSide y _hNorm alrededor de _hUp,
+  // en vez de THREE.Quaternion.setFromUnitVectors(_hSide, _hNorm).
+  // Motivo (encontrado leyendo el código, sin asumir el bug viejo de rig):
+  // ambos vectores ya están proyectados ⊥ a _hUp arriba, así que el eje de
+  // giro correcto SIEMPRE es _hUp. Pero setFromUnitVectors no lo sabe — es
+  // genérico para dos vectores cualesquiera — y su propia implementación,
+  // cuando el roll necesario se acerca a 180° (dot ≈ -1, la mano necesita un
+  // giro grande), cae a un eje ARBITRARIO derivado solo de las componentes
+  // de _hSide (fallback interno de three.js para el caso casi-antiparalelo),
+  // sin relación con _hUp ni con _hNorm. Eso mete un giro fuera de eje justo
+  // cuando el roll pendiente es más grande — candidato fuerte a la asimetría
+  // observada en CONTACT (una mano con más roll pendiente que la otra cae en
+  // esa zona inestable, la otra no). Con ángulo con signo + setFromAxisAngle
+  // el eje es _hUp exacto siempre, sin discontinuidad cerca de 180°.
+  const _rollCos = THREE.MathUtils.clamp(_hSide.dot(_hNorm), -1, 1);
+  _hCross.crossVectors(_hSide, _hNorm);
+  const _rollSign = Math.sign(_hCross.dot(_hUp)) || 1;
+  const _rollAngle = Math.atan2(_rollSign * _hCross.length(), _rollCos);
+  _dQ.setFromAxisAngle(_hUp, _rollAngle);
 
   // Nuevo quaternion world = roll_delta * current_world_Q
   _tWQ.multiplyQuaternions(_dQ, _hQ);

@@ -5,7 +5,10 @@ Detecta y corrige cuatro tipos de error que produce MediaPipe con cualquier
 dataset de lengua de señas (no depende de pre-análisis del dataset):
 
   CONTACT     — ambas manos demasiado juntas (prox_xy < umbral)
-                → reemplaza con la última pose válida pre-contacto.
+                → dedo por dedo: usa el landmark crudo si es plausible
+                  (sigue visible), si no sostiene el último valor bueno de
+                  ESE dedo (ver _contact_hand). No asume que todos los
+                  dedos se ocluyen a la vez.
 
   HOLD        — mano que estaba presente desaparece (tracking loss)
                 → mantiene la última pose válida hasta MAX_HOLD frames,
@@ -39,6 +42,39 @@ MAX_HOLD        = 8      # frames máximos para mantener pose tras pérdida de t
 BLEND_ALPHA     = 0.40   # peso del frame actual en blend ruidoso (1-alpha = frame anterior)
 HOLD_DECAY      = 0.85   # factor de decay en pose de reposo tras MAX_HOLD frames
 
+# "Span" (wrist→MCP medio, tamaño de mano en imagen) mínimo aceptable como
+# fracción de un baseline reciente, para aceptar un frame como referencia de
+# congelado (last_valid) de CONTACT. Hallazgo (seña 0018, sesión 2026-09-12):
+# el tracking de MediaPipe de AMBAS manos se degrada (span cae de ~0.05 a
+# ~0.01, un colapso de 4x) en los ~4 frames PREVIOS a que prox_xy cruce
+# CONTACT_THRESH — la oclusión mutua ya afecta la calidad del landmark antes
+# de que las palmas se consideren "en contacto". Sin este chequeo, el corrector
+# congela una pose ya corrupta (segmentos de falange casi nulos → ángulos 2D
+# dominados por ruido, ej. DIP midiendo 100-200° con PIP casi en 0°, algo
+# biomecánicamente imposible) y la arrastra rígidamente durante TODO el
+# contacto (el rebase solo traslada, no corrige la forma).
+SPAN_MIN_RATIO  = 0.9
+SPAN_EMA_ALPHA  = 0.05
+
+# Índices de landmarks por familia de dedo (MediaPipe Hands) — igual a
+# FINGER_LM en app.js. Usado por el chequeo de continuidad por dedo durante
+# CONTACT (ver _contact_hand).
+_FINGER_IDX = {
+    "thumb":  (1, 2, 3, 4),
+    "index":  (5, 6, 7, 8),
+    "middle": (9, 10, 11, 12),
+    "ring":   (13, 14, 15, 16),
+    "pinky":  (17, 18, 19, 20),
+}
+
+# Cambio de ángulo (grados) máximo plausible de un frame al siguiente (24
+# fps) en el nudillo proximal de un dedo, antes de tratar el dato crudo
+# como un salto de oclusión puntual en vez de movimiento real. Calibrado
+# con datos reales de 0018 (ver _contact_hand): ahí el ruido de oclusión
+# salta >40-50° con signo inconsistente frame a frame (ej. 44°→12°→54°→
+# 107°→46°...); el cierre real, aunque rápido, es más gradual.
+FINGER_JUMP_MAX_DEG = 45.0
+
 # ── Filtro temporal One-Euro (Casiez, Roussel & Vogel, CHI 2012) ─────────────
 # Se aplica como último paso, sobre los landmarks ya corregidos por
 # CONTACT/HOLD/BLEND. Los parámetros dependen de la ESCALA de las coordenadas:
@@ -68,6 +104,13 @@ def _prox_xy(lm_r: list[dict], lm_l: list[dict]) -> float:
     return math.sqrt((cx - dx) ** 2 + (cy - dy) ** 2)
 
 
+def _hand_span(lm: list[dict]) -> float:
+    """Tamaño de mano en imagen (wrist→MCP medio, 2D). Proxy barato de calidad
+    de detección: colapsa cuando MediaPipe empieza a perder los landmarks por
+    oclusión (ver SPAN_MIN_RATIO)."""
+    return math.hypot(lm[9]["x"] - lm[0]["x"], lm[9]["y"] - lm[0]["y"])
+
+
 def _mean_disp(prev: list[dict], curr: list[dict]) -> float:
     """Desplazamiento medio de landmarks entre dos frames consecutivos."""
     return sum(
@@ -89,38 +132,41 @@ def _blend_lm(prev: list[dict], curr: list[dict], alpha: float) -> list[dict]:
     ]
 
 
-def _rebase_to_wrist(new_wrist: dict, frozen_lm: list[dict]) -> list[dict]:
+def _translate(points: list[dict], old_ref: dict, new_ref: dict) -> list[dict]:
     """
-    Re-basa una pose de mano congelada (pre-contacto) al wrist ACTUAL.
+    Traslada rígidamente `points` por el delta (new_ref − old_ref).
 
-    Bug corregido: antes se pegaban landmarks 1-20 en coordenadas absolutas
-    de un frame anterior directamente al wrist del frame actual, sin
-    trasladar. Si la muñeca se movió entre el frame congelado y el frame de
-    contacto (caso típico: se está moviendo hacia la otra mano), la forma de
-    la mano quedaba flotando en el lugar equivocado respecto al wrist real.
-
-    Efecto medido en vivo (app.js, debug de dedos): el "span" (wrist→MCP,
-    usado como referencia de escala para el deadzone de flexión de dedos) se
-    encogía frame a frame durante todo el CONTACT en vez de quedarse
-    constante, porque mezclaba un MCP viejo (absoluto) con un wrist nuevo.
-    Eso desincroniza el umbral de confianza del tamaño real (constante) de
-    los segmentos del dedo → PIP/DIP quedan marcados "no confiables" durante
-    la mayor parte del contacto y la mano se relaja al rest en vez de cerrar
-    (seña 0018: el puño no cerraba, solo se juntaban las muñecas).
-
-    Aquí se traslada rígidamente la pose congelada por el delta de wrist
-    (nuevo - viejo), preservando la forma de la mano pero siguiendo al wrist
-    real — "span" y los segmentos internos quedan estables durante todo el
-    hold, tal como en el frame en que se congelaron.
+    Bug corregido en su día (histórico — ver _contact_hand para el diseño
+    actual): pegar landmarks congelados en coordenadas absolutas de un frame
+    anterior directamente sobre el wrist del frame actual, sin trasladar,
+    hacía que la forma de la mano quedara flotando en el lugar equivocado
+    apenas la muñeca se movía (típico: moviéndose hacia la otra mano). Eso
+    encogía el "span" (wrist→MCP) frame a frame en vez de quedarse
+    constante, desincronizando el deadzone de flexión de dedos del tamaño
+    real (constante) de los segmentos — la mano no cerraba el puño en
+    CONTACT (seña 0018). Aquí se traslada rígidamente por el delta de
+    referencia, preservando la forma pero siguiendo la posición real.
     """
-    ow = frozen_lm[0]
-    dx = new_wrist["x"] - ow["x"]
-    dy = new_wrist["y"] - ow["y"]
-    dz = new_wrist["z"] - ow["z"]
-    result = [dict(new_wrist)]
-    for p in frozen_lm[1:]:
-        result.append({"x": p["x"] + dx, "y": p["y"] + dy, "z": p["z"] + dz})
-    return result
+    dx = new_ref["x"] - old_ref["x"]
+    dy = new_ref["y"] - old_ref["y"]
+    dz = new_ref["z"] - old_ref["z"]
+    return [{"x": p["x"] + dx, "y": p["y"] + dy, "z": p["z"] + dz} for p in points]
+
+
+def _finger_joint_angle_deg(lm: list[dict], mcp: int, pip: int, dip: int) -> Optional[float]:
+    """
+    Ángulo 2D (grados) entre el segmento mcp→pip y pip→dip — el mismo
+    cálculo de "flexión" que hace app.js. Se usa aquí solo como señal de
+    PLAUSIBILIDAD frame a frame (¿este dedo sigue siendo el mismo dedo
+    visible, o el dato saltó a algo implausible?), no para animar nada.
+    """
+    seg_p = (lm[pip]["x"] - lm[mcp]["x"], lm[pip]["y"] - lm[mcp]["y"])
+    seg_c = (lm[dip]["x"] - lm[pip]["x"], lm[dip]["y"] - lm[pip]["y"])
+    n_p, n_c = math.hypot(*seg_p), math.hypot(*seg_c)
+    if n_p < 1e-9 or n_c < 1e-9:
+        return None
+    cos_a = max(-1.0, min(1.0, (seg_p[0]*seg_c[0] + seg_p[1]*seg_c[1]) / (n_p * n_c)))
+    return math.degrees(math.acos(cos_a))
 
 
 def _decay_toward_wrist(lm: list[dict], factor: float) -> list[dict]:
@@ -232,8 +278,97 @@ class HandCorrector:
         self._last_valid: dict[str, list] = {}   # lado → landmarks pre-contacto válidos
         self._prev_frame: dict[str, list] = {}   # lado → landmarks del frame anterior
         self._hold_count: dict[str, int]  = {}   # lado → frames que lleva en HOLD
+        self._span_baseline: dict[str, float] = {}  # lado → EMA del span en frames aceptados
+        self._finger_ref: dict[str, dict[str, dict]] = {}  # lado → familia → último dato bueno
         self._in_contact  = False
         self._filter = {"Right": _HandFilter(), "Left": _HandFilter()}
+
+    def _is_good_frame(self, side: str, lm: list[dict]) -> bool:
+        """
+        ¿Sirve este frame como referencia de congelado (last_valid)? Rechaza
+        frames donde el span de la mano se derrumbó respecto al baseline
+        reciente — señal de oclusión mutua degradando el tracking ANTES de
+        que prox_xy cruce CONTACT_THRESH (ver SPAN_MIN_RATIO). El baseline
+        solo avanza con frames aceptados, así que una racha de frames
+        degradados no lo arrastra hacia abajo.
+        """
+        span = _hand_span(lm)
+        baseline = self._span_baseline.get(side)
+        if baseline is None:
+            self._span_baseline[side] = span
+            return True
+        if span < baseline * SPAN_MIN_RATIO:
+            return False
+        self._span_baseline[side] = (1 - SPAN_EMA_ALPHA) * baseline + SPAN_EMA_ALPHA * span
+        return True
+
+    def _update_finger_refs(self, side: str, lm: Optional[list[dict]]) -> dict[str, bool]:
+        """
+        Mantiene "caliente" la última referencia buena conocida de cada dedo
+        de `side`, comparando el ángulo crudo de este frame con el de la
+        referencia (ver FINGER_JUMP_MAX_DEG). Se llama SIEMPRE — en NORMAL y
+        en CONTACT — para que la referencia ya esté lista apenas empieza un
+        contacto; si solo se actualizara durante CONTACT, el primer frame de
+        cada contacto se aceptaría a ciegas (sin nada contra qué compararlo),
+        reintroduciendo el bug de "congelar un frame ya degradado" que esto
+        reemplaza. No toca el render en NORMAL — ahí los landmarks crudos se
+        usan tal cual los devuelva este frame, se llame o no a este método.
+
+        Devuelve, por familia de dedo, si el dato crudo de ESTE frame fue
+        aceptado como nueva referencia (dato plausible, dedo visible).
+        """
+        accepted: dict[str, bool] = {}
+        if lm is None:
+            return accepted
+        ref = self._finger_ref.setdefault(side, {})
+        for fam, idx in _FINGER_IDX.items():
+            mcp, pip, dip, _tip = idx
+            ang = _finger_joint_angle_deg(lm, mcp, pip, dip)
+            prev = ref.get(fam)
+            ok = ang is not None and (prev is None or abs(ang - prev["angle"]) <= FINGER_JUMP_MAX_DEG)
+            if ok:
+                ref[fam] = {
+                    "angle": ang,
+                    "pts": [dict(lm[i]) for i in idx],
+                    "wrist": dict(lm[0]),
+                }
+            accepted[fam] = ok
+        return accepted
+
+    def _contact_hand(self, side: str, raw_lm: list[dict], accepted: dict[str, bool]) -> list[dict]:
+        """
+        Landmarks de una mano durante CONTACT, dedo por dedo — reemplaza el
+        freeze anterior (toda la mano congelada de una vez al entrar en
+        contacto). Ese enfoque asumía que TODOS los dedos se ocluyen a la
+        vez apenas las palmas se acercan; midiendo datos reales (seña 0018)
+        no es así: el índice derecho se mantiene bajo y estable ~25 frames
+        durante lo que el corrector marcaba "CONTACT" mientras el resto de
+        los dedos ya cerraron en puño — señal real de MediaPipe, no ruido —
+        y el freeze la tapaba con una foto vieja de antes de que la mano
+        terminara de formar esa pose (el rebase solo traslada, nunca
+        corrige la forma; si se congela demasiado pronto, el puño nunca
+        llega a cerrar del todo aunque el dato real sí lo muestre).
+
+        lm0 (wrist) siempre es el real de este frame — visible y preciso
+        incluso en contacto. Para cada dedo: si `accepted` (ver
+        _update_finger_refs) dice que el dato crudo de este frame es
+        plausible, se usa tal cual — el dedo sigue siendo visible. Si no
+        (oclusión puntual real de ESE dedo), se sirve la última referencia
+        buena, trasladada rígidamente al wrist actual — igual que el freeze
+        viejo, pero por dedo en vez de por mano entera.
+        """
+        out = [dict(raw_lm[0])]
+        ref_all = self._finger_ref.get(side, {})
+        for fam, idx in _FINGER_IDX.items():
+            if accepted.get(fam):
+                out.extend(dict(raw_lm[i]) for i in idx)
+                continue
+            ref = ref_all.get(fam)
+            if ref is not None:
+                out.extend(_translate(ref["pts"], ref["wrist"], raw_lm[0]))
+            else:
+                out.extend(dict(raw_lm[i]) for i in idx)  # sin referencia aún → crudo
+        return out
 
     # ── API pública ──────────────────────────────────────────────────────────
 
@@ -290,25 +425,38 @@ class HandCorrector:
             if prox < self.contact_thresh:
                 # Manos en contacto / oclusión mutua.
                 # lm0 (wrist) sí es visible y preciso incluso en contacto → conservar.
-                # lm1-20 (dedos) sufren oclusión mutua → congelar en forma pre-contacto.
+                # lm1-20 (dedos): decisión POR DEDO, no por mano entera — ver
+                # _contact_hand (algunos dedos siguen siendo visibles aunque
+                # las palmas ya se consideren "en contacto").
                 state = "CONTACT"
                 self._in_contact = True
-                r_frozen = self._last_valid.get("Right", r_lm)
-                l_frozen = self._last_valid.get("Left",  l_lm)
-                r_lm = _rebase_to_wrist(r_lm[0], r_frozen)  # wrist actual + dedos pre-contacto, re-basados
-                l_lm = _rebase_to_wrist(l_lm[0], l_frozen)  # wrist actual + dedos pre-contacto, re-basados
+                r_acc = self._update_finger_refs("Right", r_lm)
+                l_acc = self._update_finger_refs("Left",  l_lm)
+                r_lm = self._contact_hand("Right", r_lm, r_acc)
+                l_lm = self._contact_hand("Left",  l_lm, l_acc)
             else:
                 self._in_contact = False
-                # Actualizar last_valid solo fuera de contacto
-                self._last_valid["Right"] = r_lm
-                self._last_valid["Left"]  = l_lm
+                # Mantener "caliente" la referencia por dedo (ver
+                # _update_finger_refs) aunque no estemos en contacto, para
+                # que ya esté lista apenas empiece el próximo.
+                self._update_finger_refs("Right", r_lm)
+                self._update_finger_refs("Left",  l_lm)
+                # Actualizar last_valid (usado solo por HOLD, pérdida total
+                # de la mano) solo fuera de contacto, y solo si el frame no
+                # viene ya degradado (ver _is_good_frame).
+                if self._is_good_frame("Right", r_lm):
+                    self._last_valid["Right"] = r_lm
+                if self._is_good_frame("Left", l_lm):
+                    self._last_valid["Left"] = l_lm
                 self._hold_count.pop("Right", None)
                 self._hold_count.pop("Left",  None)
         elif not self._in_contact:
             # Si no hay contacto, actualizar last_valid con las que sí detectó
             for side, lm in [("Right", r_lm), ("Left", l_lm)]:
                 if lm:
-                    self._last_valid[side] = lm
+                    self._update_finger_refs(side, lm)
+                    if self._is_good_frame(side, lm):
+                        self._last_valid[side] = lm
 
         # 2. Detección de salto brusco (BLEND) — solo fuera de contacto
         if state == "NORMAL":
