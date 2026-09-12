@@ -89,6 +89,40 @@ def _blend_lm(prev: list[dict], curr: list[dict], alpha: float) -> list[dict]:
     ]
 
 
+def _rebase_to_wrist(new_wrist: dict, frozen_lm: list[dict]) -> list[dict]:
+    """
+    Re-basa una pose de mano congelada (pre-contacto) al wrist ACTUAL.
+
+    Bug corregido: antes se pegaban landmarks 1-20 en coordenadas absolutas
+    de un frame anterior directamente al wrist del frame actual, sin
+    trasladar. Si la muñeca se movió entre el frame congelado y el frame de
+    contacto (caso típico: se está moviendo hacia la otra mano), la forma de
+    la mano quedaba flotando en el lugar equivocado respecto al wrist real.
+
+    Efecto medido en vivo (app.js, debug de dedos): el "span" (wrist→MCP,
+    usado como referencia de escala para el deadzone de flexión de dedos) se
+    encogía frame a frame durante todo el CONTACT en vez de quedarse
+    constante, porque mezclaba un MCP viejo (absoluto) con un wrist nuevo.
+    Eso desincroniza el umbral de confianza del tamaño real (constante) de
+    los segmentos del dedo → PIP/DIP quedan marcados "no confiables" durante
+    la mayor parte del contacto y la mano se relaja al rest en vez de cerrar
+    (seña 0018: el puño no cerraba, solo se juntaban las muñecas).
+
+    Aquí se traslada rígidamente la pose congelada por el delta de wrist
+    (nuevo - viejo), preservando la forma de la mano pero siguiendo al wrist
+    real — "span" y los segmentos internos quedan estables durante todo el
+    hold, tal como en el frame en que se congelaron.
+    """
+    ow = frozen_lm[0]
+    dx = new_wrist["x"] - ow["x"]
+    dy = new_wrist["y"] - ow["y"]
+    dz = new_wrist["z"] - ow["z"]
+    result = [dict(new_wrist)]
+    for p in frozen_lm[1:]:
+        result.append({"x": p["x"] + dx, "y": p["y"] + dy, "z": p["z"] + dz})
+    return result
+
+
 def _decay_toward_wrist(lm: list[dict], factor: float) -> list[dict]:
     """
     Hace decay exponencial de todos los landmarks hacia la muñeca (lm[0]).
@@ -261,8 +295,8 @@ class HandCorrector:
                 self._in_contact = True
                 r_frozen = self._last_valid.get("Right", r_lm)
                 l_frozen = self._last_valid.get("Left",  l_lm)
-                r_lm = [r_lm[0]] + r_frozen[1:]   # wrist actual + dedos pre-contacto
-                l_lm = [l_lm[0]] + l_frozen[1:]   # wrist actual + dedos pre-contacto
+                r_lm = _rebase_to_wrist(r_lm[0], r_frozen)  # wrist actual + dedos pre-contacto, re-basados
+                l_lm = _rebase_to_wrist(l_lm[0], l_frozen)  # wrist actual + dedos pre-contacto, re-basados
             else:
                 self._in_contact = False
                 # Actualizar last_valid solo fuera de contacto

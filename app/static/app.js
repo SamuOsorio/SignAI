@@ -37,6 +37,20 @@ const FLEX_GAIN = 1.25;
 // tendinoso: DIP ≈ 2/3 · PIP.
 const DIP_PIP_COUPLING = 0.66;
 
+// El nudillo (MCP, falange proximal) NO se mide con el mismo método que PIP/DIP:
+// su "segmento padre" es wrist→MCP, que en 3D apunta a través del ancho de la
+// palma — NO es paralelo a MCP→PIP (el eje del dedo) ni siquiera con la mano
+// extendida en reposo. PIP→DIP y DIP→TIP sí son ~paralelos entre sí (mismo dedo),
+// así que su ángulo 2D es estable bajo rotación 3D de brazo/muñeca; wrist→MCP vs
+// MCP→PIP no lo es: cualquier rotación fuera del plano de cámara (gesto de
+// acercar la mano a la otra) desalinea la proyección sin que el dedo se haya
+// flexionado. Validado con datos LSC50: en una seña de contacto (solo rotación,
+// sin cierre real) el ángulo wrist-MCP se dispara a 75-100°; en una seña de puño
+// real se queda en 8-14° pese a que PIP mide 100-120°. Es ruido, no señal.
+// Se deriva de PIP por el mismo acoplamiento tendinoso que DIP, en vez de
+// medirse — MCP flexiona algo menos que PIP en la mayoría de agarres.
+const MCP_PIP_COUPLING = 0.8;
+
 // Override del signo del giro de flexión por mano:
 //   0  → automático (se deduce del rig: hacia qué lado se curva el pulgar = palmar)
 //   ±1 → forzar ese signo (usar solo si el automático se equivoca; ver consola)
@@ -93,6 +107,14 @@ const state = {
   // segmento es más corto que fingerDeadzone × (largo de palma wrist→MCP medio).
   // Evita rotar hacia ruido puro cuando el dedo casi no se mueve. (bundle dedos, punto B)
   fingerDeadzone: 0.12,
+  // Deadzone durante CONTACT: mucho más chico. El propósito del deadzone es
+  // rechazar RUIDO de tracking en vivo — pero en CONTACT hand_corrector.py ya
+  // congeló la pose (mismos landmarks repetidos frame a frame, cero jitter por
+  // construcción), así que un segmento corto ahí no es ruido: es un dedo
+  // genuinamente flexionado (se acorta en la proyección 2D al doblarse). Con
+  // el deadzone normal (0.12), un puño real queda marcado "no confiable" y se
+  // relaja al rest — la mano no cierra durante el contacto (seña 0018).
+  fingerDeadzoneContact: 0.02,
   // Posiciones world de hombros y longitudes de segmentos de brazo en rest pose.
   // Se calcula una vez al cargar el GLB y se usa para el IK de brazos.
   armRest: {
@@ -337,8 +359,14 @@ const _ikWristL     = new THREE.Vector3();
 const _ikWristR     = new THREE.Vector3();
 
 // Factor de fusión durante CONTACT: 0 = sin efecto, 1 = ambas muñecas al midpoint exacto.
-// 0.8 lleva las muñecas al 80% del camino hacia el punto medio → manos casi juntas.
-const CONTACT_BLEND = 0.8;
+// Con 0.8, medido en datos reales (seña 0018, contacto lateral mano-a-mano, no
+// solapado): la separación real entre muñecas es ~0.22-0.36 u (bodyScale
+// aplicado), y 0.8 la reducía a ~0.04-0.07 u — MENOS que el ancho de una mano
+// (~0.075 u estimado) → no queda espacio físico para las dos manos lado a lado,
+// los brazos se cruzan en vez de acercarse (seña 0018: "debería ponerlas una al
+// lado de la otra"). 0.35 deja ~0.15-0.25 u — se ven claramente juntas sin
+// forzar un solapamiento que la geometría no puede resolver sin cruzarse.
+const CONTACT_BLEND = 0.35;
 
 // Sesgo lateral del codo hacia afuera (fracción del alcance del brazo). En señas
 // frente al pecho los targets de muñeca caen cerca de la línea media → sin esto
@@ -585,13 +613,28 @@ function flexFinger(bone, angle, alpha = state.fingerAlpha) {
 // con ~3× menos ruido. (bundle dedos, punto E)
 const Z_HAND = 0.3;
 
-function applyHandOrientation(bone, rawLms, normalSign) {
+function applyHandOrientation(bone, rawLms, normalSign, contactMode = false) {
   const w = rawLms[0];
 
-  // ── Paso 1: alinear eje Y del hueso al dedo medio ───────────────────────
-  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * Z_HAND);
-  if (_hUp.lengthSq() < 1e-8) return;
-  _hUp.normalize();
+  // ── Paso 1: alinear eje Y del hueso (hacia dónde "apunta" la mano) ──────
+  if (contactMode && bone.parent) {
+    // Durante CONTACT, rawLms[9] (dedo medio) viene de la pose PRE-contacto
+    // congelada — solo trasladada para seguir la muñeca (_rebase_to_wrist en
+    // hand_corrector.py), nunca re-orientada. Usarla aquí deja la mano
+    // "mirando" para siempre hacia donde miraba justo antes del contacto —
+    // a menudo una pose de transición (ej. seña 0018: queda con la palma
+    // hacia arriba en vez del índice apuntando a cámara). El antebrazo, en
+    // cambio, se sigue orientando en vivo por IK durante todo el CONTACT (no
+    // depende de landmarks de mano) → se usa su eje Y como proxy de "hacia
+    // dónde apunta la mano" (sin flexión propia de muñeca, pero sigue al
+    // brazo real en vez de quedar pegada a la pose vieja).
+    bone.parent.getWorldQuaternion(_hQ);
+    _hUp.set(0, 1, 0).applyQuaternion(_hQ);
+  } else {
+    _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * Z_HAND);
+    if (_hUp.lengthSq() < 1e-8) return;
+    _hUp.normalize();
+  }
   rotateBone(bone, _hUp); // slerp incluido
 
   // ── Paso 2: roll — girar el hueso para que su Z apunte a la normal de palma ──
@@ -713,9 +756,11 @@ function applyFace(face) {
 }
 
 function applyFrame(frameData) {
+  const frameState = frameData._corrector_state ?? 'NORMAL';
+
   // ── Brazos: IK de 2 huesos hacia la posición real de la muñeca ───────────
   if (frameData.body) {
-    applyArmIK(frameData.body, frameData.hands, frameData._corrector_state ?? 'NORMAL');
+    applyArmIK(frameData.body, frameData.hands, frameState);
   }
   // ── Cara: mandíbula y cejas ───────────────────────────────────────────────
   if (frameData.face) {
@@ -732,8 +777,9 @@ function applyFrame(frameData) {
   const bHR = state.bones.get("handr");
   // normalSign +1 para mano izquierda (cross(idx,pnk) apunta hacia la palma),
   // -1 para mano derecha (los dedos aparecen en orden inverso → normal al revés).
-  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
-  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1);
+  const inContact = frameState === 'CONTACT';
+  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1, inContact);
+  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1, inContact);
 
   // Escala de cada mano = largo de palma (wrist → MCP medio), base del deadzone.
   const handSpan = {};
@@ -754,6 +800,7 @@ function applyFrame(frameData) {
       const sfx  = side === "Left" ? "l" : "r";
       const span = handSpan[side] ?? 0;
       const hinge = FINGER_HINGE && fam !== "thumb";
+      const deadzone = frameState === 'CONTACT' ? state.fingerDeadzoneContact : state.fingerDeadzone;
 
       // Paso 1: ángulo de flexión y fiabilidad de las 3 falanges.
       // bend[k] = giro 2D (falange previa → actual) × FLEX_GAIN ; rel[k] = señal fiable.
@@ -767,11 +814,26 @@ function applyFrame(frameData) {
         seg[k - 1]  = _segC.clone();
         // Deadzone adaptativo (punto B): falange más corta que el piso de ruido
         // (dedo en escorzo, mano colgando) o segmento padre degenerado → no fiable.
-        rel[k - 1]  = _segC.length() >= span * state.fingerDeadzone && _segP.lengthSq() >= 1e-10;
+        rel[k - 1]  = _segC.length() >= span * deadzone && _segP.lengthSq() >= 1e-10;
         bend[k - 1] = rel[k - 1] ? _segP.angleTo(_segC) * FLEX_GAIN : 0;
       }
       // La distal sigue a la media si su propia señal no llega (acoplamiento tendinoso).
       if (hinge && !rel[2] && rel[1]) { bend[2] = bend[1] * DIP_PIP_COUPLING; rel[2] = true; }
+
+      // El nudillo (MCP, k=0) se descarta SIEMPRE que se mida directo — no es
+      // ruido ocasional, es sistemáticamente no confiable (ver MCP_PIP_COUPLING) —
+      // y se deriva de PIP en su lugar. Solo aplica a dedos con bisagra (thumb
+      // sigue con su propio segmento wrist→MCP en el retargeting libre de abajo).
+      if (hinge) {
+        if (rel[1]) { bend[0] = bend[1] * MCP_PIP_COUPLING; rel[0] = true; }
+        else        { rel[0] = false; }
+      }
+
+      // DEBUG temporal (Foco D) — activar en consola con: window._fingerDebug = true
+      if (window._fingerDebug && hinge) {
+        const deg = bend.map(b => Math.round(b * 180 / Math.PI));
+        console.log(`[FD] f=${Math.floor(state.frameIdx)} ${side} ${fam} bend°=[${deg}] rel=[${rel}] span=${span.toFixed(4)} dz=${deadzone} state=${frameState}`);
+      }
 
       // Paso 2: aplicar a cada hueso. Señal no fiable → relajar hacia el rest en
       // vez de congelar la última pose (si no, la mano queda "en garra" al bajar).
