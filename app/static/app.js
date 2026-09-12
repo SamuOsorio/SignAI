@@ -304,6 +304,9 @@ const _ikEHint = new THREE.Vector3();
 const _ikElbow = new THREE.Vector3();
 const _ikTT    = new THREE.Vector3(); // toTarget (scratch IK)
 const _ikPole  = new THREE.Vector3();
+const _ikTargetDir = new THREE.Vector3(); // dirección hombro→muñeca (scratch, bias de codo)
+const _ikPoleHat   = new THREE.Vector3(); // codo real normalizado (scratch, bias de codo)
+const _ikPerp      = new THREE.Vector3(); // componente ⊥ del codo real (scratch, bias de codo)
 
 function lmWorldOffset(lm, lmRef, scale, worldRef, out) {
   // Análisis de datos reales (sign 0005, frame 20 — manos juntas):
@@ -380,6 +383,17 @@ const ELBOW_OUT = 0.18;
 // en vez de atravesarlo (fracción del alcance del brazo).
 const TORSO_CLEAR = 0.30;
 
+// Umbral de "confiabilidad" del codo real (landmark 13/14) para decidir si el
+// sesgo anatómico de abajo (cuelgue + frontal) hace falta. Se mide como
+// sin(ángulo) entre el codo real y la línea hombro→muñeca: 0 = colineal
+// (degenerado, el solver no puede derivar giro), 1 = perpendicular (dato
+// pleno). Validado sobre las 1000 señas de LSC50: el caso colineal
+// (sin<0.3) es raro — mediana 0% de frames, máx ~22% en la peor seña — así
+// que antes el sesgo se aplicaba a full fuerza siempre, ahogando el dato
+// real de codo el resto del tiempo. Con este umbral el sesgo solo entra
+// cuando el dato real no alcanza para definir el giro.
+const ELBOW_POLE_PURITY_THRESH = 0.3;
+
 function applyArmIK(body, handsArr, frameState) {
   if (!state.armRest.L_upperL) return; // measureArmRest aún no corrió
   const scale = bodyScale(body);
@@ -427,16 +441,29 @@ function _applyOneArm(body, iS, iE, wristTarget,
     (_ikWrist.y - (shoulderWorld.y - reach * 0.5)) / (reach * 0.7), 0, 1);
   _ikWrist.z += nearBody * chestUp * reach * TORSO_CLEAR;
 
-  // Vector de polo = dirección del codo desde el hombro.
-  // Problema: cuando la mano está por encima del hombro, el vector codo→hombro
-  // y el vector hombro→muñeca son casi paralelos → después de proyectar, el polo
-  // residual es ≈0 y el solver pone el codo en dirección arbitraria.
-  // Fix: añadir un componente descendente fuerte para que el codo siempre cuelgue
-  // por debajo de la línea hombro-muñeca (posición anatómica en LSC),
-  // más un pequeño bias frontal para compensar la subestimación de z normalizado.
+  // Vector de polo = dirección del codo desde el hombro (dato real de MediaPipe).
+  // Problema original: cuando la mano está por encima del hombro, el vector
+  // codo→hombro y el vector hombro→muñeca son casi paralelos → después de
+  // proyectar, el polo residual es ≈0 y el solver pone el codo en dirección
+  // arbitraria. El fix (bias descendente + frontal) es necesario ahí, pero
+  // se aplicaba SIEMPRE a full fuerza — `degenerate` lo escala por qué tan
+  // colineal está el dato real, así que el codo real domina el resto del
+  // tiempo (ver ELBOW_POLE_PURITY_THRESH).
   _ikPole.subVectors(_ikEHint, shoulderWorld);
-  _ikPole.y -= reach * 0.35;  // codo hacia abajo (anatómico)
-  _ikPole.z += reach * 0.10;  // leve bias frontal
+
+  _ikTargetDir.subVectors(_ikWrist, shoulderWorld).normalize();
+  let degenerate = 1;
+  const poleLen = _ikPole.length();
+  if (poleLen > 1e-6) {
+    _ikPoleHat.copy(_ikPole).divideScalar(poleLen);
+    const par = _ikPoleHat.dot(_ikTargetDir);
+    _ikPerp.copy(_ikPoleHat).addScaledVector(_ikTargetDir, -par);
+    const purity = _ikPerp.length(); // sin(ángulo): 0 colineal … 1 perpendicular
+    degenerate = THREE.MathUtils.clamp(1 - purity / ELBOW_POLE_PURITY_THRESH, 0, 1);
+  }
+
+  _ikPole.y -= reach * 0.35 * degenerate;  // codo hacia abajo — solo si el dato real es ambiguo
+  _ikPole.z += reach * 0.10 * degenerate;  // leve bias frontal — idem
 
   // Codo hacia afuera, atenuado a medida que la muñeca sube por encima del hombro
   // (raise: 1 con la mano baja → 0.1 con la mano bien alta).
