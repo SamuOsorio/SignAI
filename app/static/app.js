@@ -271,6 +271,46 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 
   window._signAI = state;
 
+  // ── Debug: inspección de huesos de brazo/mano en la consola ─────────────
+  // window._dumpArm("r") / _dumpArm("l") — loguea quaternions local/world
+  // (Euler XYZ en grados) de mano/antebrazo/brazo en el frame ACTUALMENTE
+  // mostrado, más los landmarks crudos de esa mano y el estado del corrector
+  // (NORMAL/CONTACT/HOLD/BLEND). Solo lectura, sin efectos sobre el render.
+  window._dumpArm = function (side) {
+    const idx = Math.floor(state.frameIdx);
+    const frame = state.frames[idx];
+    if (!frame) { console.log("sin frame actual (¿cargaste una seña?)"); return; }
+    const label = side === "l" ? "Left" : "Right";
+    console.log(`— frame ${idx} — corrector_state=${frame._corrector_state ?? "NORMAL"} —`);
+
+    function eulerDeg(q) {
+      const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
+      return [e.x, e.y, e.z].map(r => +(r * 180 / Math.PI).toFixed(1));
+    }
+    function dump(name) {
+      const b = state.bones.get(name);
+      if (!b) { console.log(name + " NO ENCONTRADO"); return; }
+      const wq = new THREE.Quaternion();
+      b.getWorldQuaternion(wq);
+      const lq = [b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w].map(n => +n.toFixed(3));
+      console.log(
+        `${name}  parent=${b.parent ? b.parent.name : null}` +
+        `  localQ=[${lq.join(",")}]` +
+        `  localEulerDeg=[${eulerDeg(b.quaternion).join(",")}]` +
+        `  worldEulerDeg=[${eulerDeg(wq).join(",")}]`
+      );
+    }
+    ["hand" + side, "forearm_twist" + side, "forearm_stretch" + side, "arm_stretch" + side].forEach(dump);
+
+    const h = frame.hands?.find(x => x.hand === label);
+    if (h) {
+      const p = (i) => `${i}:(${h.landmarks[i].x.toFixed(3)},${h.landmarks[i].y.toFixed(3)},${h.landmarks[i].z.toFixed(3)})`;
+      console.log(`rawLms ${label} wrist=${p(0)} mid=${p(9)} idx=${p(5)} pinky=${p(17)}`);
+    } else {
+      console.log(`sin landmarks de mano ${label} en este frame`);
+    }
+  };
+
   setStatus(`Avatar listo — ${state.bones.size} huesos (${nDEF} dedos)`, "ok");
   document.getElementById("avatar-meta").textContent = `${state.bones.size} huesos · ${nDEF} dedos`;
 
