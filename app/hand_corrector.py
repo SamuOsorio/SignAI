@@ -153,15 +153,16 @@ def _translate(points: list[dict], old_ref: dict, new_ref: dict) -> list[dict]:
     return [{"x": p["x"] + dx, "y": p["y"] + dy, "z": p["z"] + dz} for p in points]
 
 
-def _finger_joint_angle_deg(lm: list[dict], mcp: int, pip: int, dip: int) -> Optional[float]:
+def _joint_angle_deg(lm: list[dict], a: int, b: int, c: int) -> Optional[float]:
     """
-    Ángulo 2D (grados) entre el segmento mcp→pip y pip→dip — el mismo
-    cálculo de "flexión" que hace app.js. Se usa aquí solo como señal de
-    PLAUSIBILIDAD frame a frame (¿este dedo sigue siendo el mismo dedo
-    visible, o el dato saltó a algo implausible?), no para animar nada.
+    Ángulo 2D (grados) entre el segmento a→b y b→c — el mismo cálculo de
+    "flexión" que hace app.js para una articulación cualquiera (PIP o DIP).
+    Se usa aquí solo como señal de PLAUSIBILIDAD frame a frame (¿este dedo
+    sigue siendo el mismo dedo visible, o el dato saltó a algo implausible?),
+    no para animar nada.
     """
-    seg_p = (lm[pip]["x"] - lm[mcp]["x"], lm[pip]["y"] - lm[mcp]["y"])
-    seg_c = (lm[dip]["x"] - lm[pip]["x"], lm[dip]["y"] - lm[pip]["y"])
+    seg_p = (lm[b]["x"] - lm[a]["x"], lm[b]["y"] - lm[a]["y"])
+    seg_c = (lm[c]["x"] - lm[b]["x"], lm[c]["y"] - lm[b]["y"])
     n_p, n_c = math.hypot(*seg_p), math.hypot(*seg_c)
     if n_p < 1e-9 or n_c < 1e-9:
         return None
@@ -305,14 +306,35 @@ class HandCorrector:
     def _update_finger_refs(self, side: str, lm: Optional[list[dict]]) -> dict[str, bool]:
         """
         Mantiene "caliente" la última referencia buena conocida de cada dedo
-        de `side`, comparando el ángulo crudo de este frame con el de la
-        referencia (ver FINGER_JUMP_MAX_DEG). Se llama SIEMPRE — en NORMAL y
-        en CONTACT — para que la referencia ya esté lista apenas empieza un
-        contacto; si solo se actualizara durante CONTACT, el primer frame de
-        cada contacto se aceptaría a ciegas (sin nada contra qué compararlo),
-        reintroduciendo el bug de "congelar un frame ya degradado" que esto
-        reemplaza. No toca el render en NORMAL — ahí los landmarks crudos se
-        usan tal cual los devuelva este frame, se llame o no a este método.
+        de `side`, comparando los ángulos crudos de este frame (PIP y DIP)
+        con los de la referencia (ver FINGER_JUMP_MAX_DEG). Se llama SIEMPRE
+        — en NORMAL y en CONTACT — para que la referencia ya esté lista
+        apenas empieza un contacto; si solo se actualizara durante CONTACT,
+        el primer frame de cada contacto se aceptaría a ciegas (sin nada
+        contra qué compararlo), reintroduciendo el bug de "congelar un
+        frame ya degradado" que esto reemplaza. No toca el render en
+        NORMAL — ahí los landmarks crudos se usan tal cual los devuelva
+        este frame, se llame o no a este método.
+
+        Bug corregido (seña 0018, sesión 2026-09-12 cont.) — intento 1:
+        solo se comprobaba continuidad del ángulo del nudillo PIP
+        (mcp→pip→dip); un segmento pip→dip o dip→tip degenerado (mano
+        perdiendo tracking por oclusión) podía dar un ángulo DIP
+        (pip→dip→tip) implausible mientras el ángulo PIP seguía luciendo
+        "continuo" — se aceptaba igual y ese ruido llegaba crudo al
+        render (ángulos DIP de 200°+ tras el FLEX_GAIN del frontend, dedos
+        en garra). Fix: exigir TAMBIÉN continuidad del ángulo DIP.
+
+        Intento 2 (revertido, sesión 2026-09-12 cont. — ver memoria): gatear
+        con el span de la mano completa (mismo proxy de `_is_good_frame`)
+        en vez de esto. Roto: el span de mano completa cae mucho por sola
+        rotación de muñeca/mano, no solo por oclusión real — en 0018
+        rechazaba el 100% de los frames de CONTACT (0/5 familias
+        aceptadas en los 40 frames medidos), congelando la mano ENTERA en
+        una pose vieja durante todo el contacto ("se encoge", dedos que
+        deberían verse no se ven). El chequeo por-articulación de abajo es
+        más quirúrgico: solo descarta la familia cuyo propio ángulo (PIP o
+        DIP) saltó de forma implausible, sin tocar las demás.
 
         Devuelve, por familia de dedo, si el dato crudo de ESTE frame fue
         aceptado como nueva referencia (dato plausible, dedo visible).
@@ -322,13 +344,23 @@ class HandCorrector:
             return accepted
         ref = self._finger_ref.setdefault(side, {})
         for fam, idx in _FINGER_IDX.items():
-            mcp, pip, dip, _tip = idx
-            ang = _finger_joint_angle_deg(lm, mcp, pip, dip)
+            mcp, pip, dip, tip = idx
+            pip_ang = _joint_angle_deg(lm, mcp, pip, dip)
+            dip_ang = _joint_angle_deg(lm, pip, dip, tip)
             prev = ref.get(fam)
-            ok = ang is not None and (prev is None or abs(ang - prev["angle"]) <= FINGER_JUMP_MAX_DEG)
+
+            def _continuous(curr: Optional[float], prev_val: Optional[float]) -> bool:
+                return curr is not None and (
+                    prev_val is None or abs(curr - prev_val) <= FINGER_JUMP_MAX_DEG
+                )
+
+            ok = _continuous(pip_ang, prev["pip"] if prev else None) and _continuous(
+                dip_ang, prev["dip"] if prev else None
+            )
             if ok:
                 ref[fam] = {
-                    "angle": ang,
+                    "pip": pip_ang,
+                    "dip": dip_ang,
                     "pts": [dict(lm[i]) for i in idx],
                     "wrist": dict(lm[0]),
                 }
