@@ -17,9 +17,19 @@ const FINGER_LM = {
 };
 
 // Familias tratadas como bisagra pura: flexión en 1 solo eje, sin torsión ni
-// abducción. El pulgar queda fuera — su articulación es un sillar, no una bisagra,
-// y el eje derivado de la normal de palma no lo modela → sigue en retargeting libre.
-const HINGE_FINGERS = ["index", "middle", "ring", "pinky"];
+// abducción. El pulgar es anatómicamente un sillar (2 grados de libertad reales:
+// flexión + abducción/oposición), no una bisagra — pero medido en LSC50 (PCA
+// sobre el segmento mcp→pip del pulgar, las 50 señas del vocabulario) su USO
+// real en este dataset es >97% planar (mediana 99.6%, peor caso 92.6%) → en la
+// práctica se comporta como bisagra de 1 eje casi siempre. Antes quedaba en
+// retargeting libre (`rotateBone`, ver más abajo) porque nadie había medido esto;
+// esa vía usa THREE.Quaternion.setFromUnitVectors, que se vuelve inestable cerca
+// de 180° (la misma clase de bug ya encontrada y arreglada para el roll de
+// muñeca) — con el pulgar cerca del rest casi todo el tiempo y picos grandes en
+// contacto, eso producía un "palo" apuntando a un eje arbitrario en pantalla
+// (sesión 2026-09-13, seña 0018). La bisagra usa `flexFinger` (setFromAxisAngle
+// sobre un eje FIJO), que no tiene esa inestabilidad sea cual sea el ángulo.
+const HINGE_FINGERS = ["thumb", "index", "middle", "ring", "pinky"];
 
 // Rango de flexión por falange: 0 = recta … ~100°. Se permite algo de
 // hiperextensión (−8°) para que la mano relajada no se vea agarrotada.
@@ -890,17 +900,18 @@ function applyFrame(frameData) {
   }
 
   // ── Dedos: bisagra anatómica por falange ────────────────────────────────
-  // Cada falange de index/middle/ring/pinky gira sobre UN eje (flexión 0–~100°,
-  // sin torsión ni abducción). El ángulo es el giro 2D en el plano de imagen
-  // entre la falange previa y la actual — buen proxy de la flexión total cuando
-  // la mano mira a cámara; se subestima con el dedo en escorzo (lo compensa FLEX_GAIN).
+  // Cada falange de thumb/index/middle/ring/pinky gira sobre UN eje (flexión
+  // 0–~100°, sin torsión ni abducción). El ángulo es el giro 2D en el plano de
+  // imagen entre la falange previa y la actual — buen proxy de la flexión total
+  // cuando la mano mira a cámara; se subestima con el dedo en escorzo (lo
+  // compensa FLEX_GAIN).
   for (const [fam, lm] of Object.entries(FINGER_LM)) {
     for (const side of ["Left", "Right"]) {
       const rawLms = handsMap[side];
       if (!rawLms) continue;
       const sfx  = side === "Left" ? "l" : "r";
       const span = handSpan[side] ?? 0;
-      const hinge = FINGER_HINGE && fam !== "thumb";
+      const hinge = FINGER_HINGE && HINGE_FINGERS.includes(fam);
       const deadzone = frameState === 'CONTACT' ? state.fingerDeadzoneContact : state.fingerDeadzone;
 
       // Paso 1: ángulo de flexión y fiabilidad de las 3 falanges.
@@ -923,8 +934,8 @@ function applyFrame(frameData) {
 
       // El nudillo (MCP, k=0) se descarta SIEMPRE que se mida directo — no es
       // ruido ocasional, es sistemáticamente no confiable (ver MCP_PIP_COUPLING) —
-      // y se deriva de PIP en su lugar. Solo aplica a dedos con bisagra (thumb
-      // sigue con su propio segmento wrist→MCP en el retargeting libre de abajo).
+      // y se deriva de PIP en su lugar. Solo aplica a dedos con bisagra (ahora
+      // incluye al pulgar — ver HINGE_FINGERS).
       if (hinge) {
         if (rel[1]) { bend[0] = bend[1] * MCP_PIP_COUPLING; rel[0] = true; }
         else        { rel[0] = false; }
