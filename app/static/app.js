@@ -747,9 +747,32 @@ function applyHandOrientation(bone, rawLms, normalSign, contactMode = false) {
   rotateBone(bone, _hUp); // slerp incluido
 
   // ── Paso 2: roll — girar el hueso para que su Z apunte a la normal de palma ──
+  // Se SALTA por completo durante CONTACT (ver más abajo, tras calcular
+  // `_hNorm`) — no se puede confiar en la fuente de este dato ahí.
   _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z) * Z_HAND);
   _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z) * Z_HAND);
   _hNorm.crossVectors(_hIdxV, _hPnkV).multiplyScalar(normalSign);
+
+  // Bug encontrado con datos reales (seña 0018, frames 26→27, sesión
+  // 2026-09-13): wrist→índice y wrist→meñique quedan casi paralelos en esta
+  // proyección (2D + Z amortiguada) — su cross product (`_hNorm`, la normal
+  // de palma) tiene magnitud minúscula EN GENERAL para esta seña (mediana
+  // 0.00043 en las 98 frames, no es un frame puntual degenerado) → un umbral
+  // de magnitud no distingue "dato malo" de "dato normal" aquí (a diferencia
+  // de otros vectores de este archivo) y un filtro de paso bajo tampoco
+  // ayuda: el cambio de signo no es un parpadeo de un frame, se sostiene en
+  // los frames siguientes (confirmado con datos: z pasa de -0.93 a +0.88 en
+  // 26→27 y se queda positivo). Con esa magnitud, CUALQUIER dirección
+  // extraída es esencialmente ruido — un roll de ~180° de la mano entera
+  // (dedos ya bien flexionados quedan apuntando a un eje absurdo, visible
+  // como "gancho" en pantalla). Confirmado aislando: resetear SOLO el hueso
+  // de la mano a rest (dejando los dedos intactos) elimina el gancho.
+  // Fix: no confiar en absoluto en esta normal durante CONTACT — mantener el
+  // roll tal como quedó del paso 1 (sin girar sobre el eje Y). Ya en NORMAL,
+  // antes/después del contacto, la mano no suele estar tan de canto y esta
+  // señal vuelve a ser razonable.
+  if (contactMode) return;
+
   if (_hNorm.lengthSq() < 1e-8) return;
   _hNorm.normalize();
   // Proyectar la normal para que sea perpendicular al eje Y (dedo)
