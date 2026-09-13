@@ -47,6 +47,20 @@ const FLEX_GAIN = 1.25;
 // tendinoso: DIP ≈ 2/3 · PIP.
 const DIP_PIP_COUPLING = 0.66;
 
+// Bug encontrado con datos reales (seña 0018, frame 29, sesión 2026-09-13): el
+// deadzone de la falange distal se mide contra el span de ESTE frame — pero si
+// la mano ya se ve chica en la imagen (rotada de canto, lejos de cámara), ese
+// span está él mismo degradado, y hasta un segmento "por encima del piso" es en
+// realidad ruido de MediaPipe a esa escala (medido: span de 0.012 vs. baseline
+// típico de 0.05 en el mismo video → un giro de 118° en la punta con la base
+// del dedo casi recta). `hand_corrector.py` ya trackea un baseline EMA del span
+// por mano (`_span_baseline`) para su propio uso; se expone como
+// `frame._hand_span_ratio[side]` (span de este frame / baseline reciente, None
+// si aún no hay baseline) para no reimplementar el tracking acá. Por debajo de
+// este umbral, la DISTAL no se mide directo aunque su segmento no sea corto —
+// se deriva de PIP igual que cuando el segmento SÍ es corto.
+const HAND_SPAN_DEGRADED_RATIO = 0.3;
+
 // El nudillo (MCP, falange proximal) NO se mide con el mismo método que PIP/DIP:
 // su "segmento padre" es wrist→MCP, que en 3D apunta a través del ancho de la
 // palma — NO es paralelo a MCP→PIP (el eje del dedo) ni siquiera con la mano
@@ -951,6 +965,9 @@ function applyFrame(frameData) {
       const span = handSpan[side] ?? 0;
       const hinge = FINGER_HINGE && HINGE_FINGERS.includes(fam);
       const deadzone = frameState === 'CONTACT' ? state.fingerDeadzoneContact : state.fingerDeadzone;
+      // undefined (recién detectada, sin baseline aún) → no degradado, benefit of the doubt.
+      const spanRatio = frameData._hand_span_ratio?.[side];
+      const spanDegraded = spanRatio != null && spanRatio < HAND_SPAN_DEGRADED_RATIO;
 
       // Paso 1: ángulo de flexión y fiabilidad de las 3 falanges.
       // bend[k] = giro 2D (falange previa → actual) × FLEX_GAIN ; rel[k] = señal fiable.
@@ -974,7 +991,8 @@ function applyFrame(frameData) {
         // fiable (`rel[2]=true`, solo exigía "no cero") y medía el ángulo
         // contra ese mismo segmento ruidoso → ángulos DIP de 200°+ ya en
         // NORMAL, sin relación con hand_corrector.py ni con CONTACT.
-        rel[k - 1]  = _segC.length() >= span * deadzone && _segP.length() >= span * deadzone;
+        rel[k - 1]  = _segC.length() >= span * deadzone && _segP.length() >= span * deadzone
+          && !(k === 3 && spanDegraded); // ver HAND_SPAN_DEGRADED_RATIO
         bend[k - 1] = rel[k - 1] ? _segP.angleTo(_segC) * FLEX_GAIN : 0;
       }
       // La distal sigue a la media si su propia señal no llega (acoplamiento tendinoso).

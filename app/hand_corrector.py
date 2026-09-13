@@ -284,6 +284,21 @@ class HandCorrector:
         self._in_contact  = False
         self._filter = {"Right": _HandFilter(), "Left": _HandFilter()}
 
+    def _span_ratio(self, side: str, lm: list[dict]) -> Optional[float]:
+        """
+        Lectura de solo-consulta (no muta `_span_baseline`): span de ESTE
+        frame como fracción del baseline reciente de `side`. None si aún no
+        hay baseline (primer frame de esa mano). Expuesto al frontend (ver
+        `_process_frame`) para que `app.js` pueda desconfiar de señales poco
+        fiables a esa escala (la falange distal, la más corta) sin
+        necesidad de reimplementar el tracking de baseline ahí — ver
+        `HAND_SPAN_DEGRADED_RATIO` en app.js.
+        """
+        baseline = self._span_baseline.get(side)
+        if baseline is None or baseline < 1e-9:
+            return None
+        return _hand_span(lm) / baseline
+
     def _is_good_frame(self, side: str, lm: list[dict]) -> bool:
         """
         ¿Sirve este frame como referencia de congelado (last_valid)? Rechaza
@@ -449,6 +464,16 @@ class HandCorrector:
         r_lm: Optional[list] = by_side.get("Right")
         l_lm: Optional[list] = by_side.get("Left")
 
+        # Span (crudo, antes de cualquier corrección) como fracción del
+        # baseline reciente — ver `_span_ratio`. Capturado ANTES de que
+        # CONTACT/HOLD/filtro reasignen r_lm/l_lm: nos interesa qué tan
+        # grande vio MediaPipe la mano en este frame REAL, no la forma ya
+        # corregida.
+        span_ratio = {
+            "Right": self._span_ratio("Right", r_lm) if r_lm else None,
+            "Left":  self._span_ratio("Left",  l_lm) if l_lm else None,
+        }
+
         state = "NORMAL"
 
         # 1. Detección de contacto/oclusión
@@ -566,5 +591,10 @@ class HandCorrector:
             if side not in seen and lm_out is not None:
                 out_hands.append({"hand": side, "landmarks": lm_out})
 
-        corrected_frame = {**frame, "hands": out_hands, "_corrector_state": state}
+        corrected_frame = {
+            **frame,
+            "hands": out_hands,
+            "_corrector_state": state,
+            "_hand_span_ratio": span_ratio,
+        }
         return corrected_frame, state
