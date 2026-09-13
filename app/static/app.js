@@ -340,6 +340,21 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
     for (let i = 0; i <= idx; i++) window._stepTo(i);
   };
 
+  // window._stepRealistic(idx, callsPerFrame=3) — como _stepFrom0, pero
+  // llama applyFrame varias veces por frame de contenido, igual que la
+  // reproducción real: animTick corre en cada refresco de pantalla (~60Hz),
+  // no en cada frame de contenido (24fps) — el suavizado (slerp) converge
+  // ~2-3 veces más por frame en vivo que con _stepFrom0 (una sola llamada).
+  // Encontrado en sesión 2026-09-13: un caso se veía distinto en vivo que
+  // con _stepFrom0 por esta diferencia. Usar este para depurar de ahora en
+  // más — _stepFrom0 puede subestimar cuánto convergió una pose en pantalla.
+  window._stepRealistic = function (idx, callsPerFrame = 3) {
+    resetPose();
+    for (let i = 0; i <= idx; i++) {
+      for (let c = 0; c < callsPerFrame; c++) window._stepTo(i);
+    }
+  };
+
   setStatus(`Avatar listo — ${state.bones.size} huesos (${nDEF} dedos)`, "ok");
   document.getElementById("avatar-meta").textContent = `${state.bones.size} huesos · ${nDEF} dedos`;
 
@@ -925,8 +940,18 @@ function applyFrame(frameData) {
         _segP.set(pB.x - pA.x, -(pB.y - pA.y), 0);
         seg[k - 1]  = _segC.clone();
         // Deadzone adaptativo (punto B): falange más corta que el piso de ruido
-        // (dedo en escorzo, mano colgando) o segmento padre degenerado → no fiable.
-        rel[k - 1]  = _segC.length() >= span * deadzone && _segP.lengthSq() >= 1e-10;
+        // (dedo en escorzo, mano colgando) o segmento padre por debajo del mismo
+        // piso → no fiable. El segmento padre de esta falange (`_segP`) es EL
+        // MISMO vector que ya se evaluó como `_segC` en la iteración anterior
+        // (k-1) — si ahí no alcanzó el piso de ruido (`rel[k-2]` = false), aquí
+        // NO puede tratarse como confiable solo porque no es exactamente cero.
+        // Bug encontrado con datos reales (seña 0018, frame 49, fuera de
+        // CONTACT): con la falange PIP marcada no-fiable (`rel[1]=false`, su
+        // segmento PIP→DIP por debajo del piso), la DISTAL igual se marcaba
+        // fiable (`rel[2]=true`, solo exigía "no cero") y medía el ángulo
+        // contra ese mismo segmento ruidoso → ángulos DIP de 200°+ ya en
+        // NORMAL, sin relación con hand_corrector.py ni con CONTACT.
+        rel[k - 1]  = _segC.length() >= span * deadzone && _segP.length() >= span * deadzone;
         bend[k - 1] = rel[k - 1] ? _segP.angleTo(_segC) * FLEX_GAIN : 0;
       }
       // La distal sigue a la media si su propia señal no llega (acoplamiento tendinoso).
