@@ -12,6 +12,21 @@ __pycache__/
 data/VIDEOS.zip
 data/LANDMARKS/
 data/IMU/
+data/LSC50.pdf
+
+# Documentación de tesis (archivos locales)
+docs/*.pdf
+docs/*.docx
+Resources/docs/*.pdf
+Resources/docs/*.docx
+
+# Scripts de autor para Blender (no corren en el servidor)
+scripts/export_avatar.py
+scripts/setup_rig.py
+scripts/retarget_blender.py
+Resources/scripts/export_avatar.py
+Resources/scripts/setup_rig.py
+Resources/scripts/retarget_blender.py
 
 # ---------- Runtime generated ----------
 Resources/scripts/landmarks/
@@ -19,11 +34,12 @@ app/video_cache/
 
 # ---------- Blender / MediaPipe ----------
 assets/
-blender/*.blend
-blender/*.blend1
-blender/RiS_StartFiles_v2.zip
-blender/RiS_StartFiles_v2/
+blender/
 Resources/scripts/hand_landmarker.task
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
 
 # ---------- Unity (scoped to unity/SignAI/) ----------
 # Cache / output (regenerated on first open or build)

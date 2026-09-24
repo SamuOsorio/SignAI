@@ -1,21 +1,89 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
-// ── Mapeo landmarks MediaPipe → huesos DEF de Rigify ────────────────────────
-// [nombre_hueso, idx_landmark_inicio, idx_landmark_fin]
-const BONE_MAP = [
-  ["thumb01L",    1, 2],  ["thumb02L",    2, 3],  ["thumb03L",    3, 4],
-  ["f_index01L",  5, 6],  ["f_index02L",  6, 7],  ["f_index03L",  7, 8],
-  ["f_middle01L", 9,10],  ["f_middle02L",10,11],  ["f_middle03L",11,12],
-  ["f_ring01L",  13,14],  ["f_ring02L",  14,15],  ["f_ring03L",  15,16],
-  ["f_pinky01L", 17,18],  ["f_pinky02L", 18,19],  ["f_pinky03L", 19,20],
-  ["thumb01R",    1, 2],  ["thumb02R",    2, 3],  ["thumb03R",    3, 4],
-  ["f_index01R",  5, 6],  ["f_index02R",  6, 7],  ["f_index03R",  7, 8],
-  ["f_middle01R", 9,10],  ["f_middle02R",10,11],  ["f_middle03R",11,12],
-  ["f_ring01R",  13,14],  ["f_ring02R",  14,15],  ["f_ring03R",  15,16],
-  ["f_pinky01R", 17,18],  ["f_pinky02R", 18,19],  ["f_pinky03R", 19,20],
-];
+// ── Dedos: landmarks MediaPipe Hands por familia ────────────────────────────
+// [MCP, PIP, DIP, TIP]. Las falanges 1/2/3 de cada familia mapean a los huesos
+// AutoRigPro thumb1/2/3, index1/2/3, … (Three.js quita los puntos: index1.l → index1l).
+// Los metacarpianos (*1_base*) NO se animan: sus pesos ya viven en hand.l/r y
+// orientarlos desde wrist→nudillo abría la palma en abanico. (bundle dedos, punto A)
+const FINGER_LM = {
+  thumb:  [1,  2,  3,  4],
+  index:  [5,  6,  7,  8],
+  middle: [9, 10, 11, 12],
+  ring:   [13, 14, 15, 16],
+  pinky:  [17, 18, 19, 20],
+};
+
+// Familias tratadas como bisagra pura: flexión en 1 solo eje, sin torsión ni
+// abducción. El pulgar es anatómicamente un sillar (2 grados de libertad reales:
+// flexión + abducción/oposición), no una bisagra — pero medido en LSC50 (PCA
+// sobre el segmento mcp→pip del pulgar, las 50 señas del vocabulario) su USO
+// real en este dataset es >97% planar (mediana 99.6%, peor caso 92.6%) → en la
+// práctica se comporta como bisagra de 1 eje casi siempre. Antes quedaba en
+// retargeting libre (`rotateBone`, ver más abajo) porque nadie había medido esto;
+// esa vía usa THREE.Quaternion.setFromUnitVectors, que se vuelve inestable cerca
+// de 180° (la misma clase de bug ya encontrada y arreglada para el roll de
+// muñeca) — con el pulgar cerca del rest casi todo el tiempo y picos grandes en
+// contacto, eso producía un "palo" apuntando a un eje arbitrario en pantalla
+// (sesión 2026-09-13, seña 0018). La bisagra usa `flexFinger` (setFromAxisAngle
+// sobre un eje FIJO), que no tiene esa inestabilidad sea cual sea el ángulo.
+const HINGE_FINGERS = ["thumb", "index", "middle", "ring", "pinky"];
+
+// Rango de flexión por falange: 0 = recta … ~100°. Se permite algo de
+// hiperextensión (−8°) para que la mano relajada no se vea agarrotada.
+const FLEX_MIN_RAD = -0.14;
+const FLEX_MAX_RAD =  1.75;
+
+// Ganancia sobre el ángulo de flexión 2D antes del clamp. El giro medido en el
+// plano de imagen subestima la flexión real por escorzo (la falange se acorta al
+// doblarse hacia/desde la cámara) → 1.0 deja los dedos a medio cerrar. >1 compensa.
+const FLEX_GAIN = 1.25;
+
+// La falange distal (DIP) tiene el segmento más corto y ruidoso → suele caer bajo
+// el deadzone y no llega a cerrar ("no termina de flexionar la punta"). Cuando su
+// señal propia no es fiable se deriva de la falange media (PIP) por acoplamiento
+// tendinoso: DIP ≈ 2/3 · PIP.
+const DIP_PIP_COUPLING = 0.66;
+
+// Bug encontrado con datos reales (seña 0018, frame 29, sesión 2026-09-13): el
+// deadzone de la falange distal se mide contra el span de ESTE frame — pero si
+// la mano ya se ve chica en la imagen (rotada de canto, lejos de cámara), ese
+// span está él mismo degradado, y hasta un segmento "por encima del piso" es en
+// realidad ruido de MediaPipe a esa escala (medido: span de 0.012 vs. baseline
+// típico de 0.05 en el mismo video → un giro de 118° en la punta con la base
+// del dedo casi recta). `hand_corrector.py` ya trackea un baseline EMA del span
+// por mano (`_span_baseline`) para su propio uso; se expone como
+// `frame._hand_span_ratio[side]` (span de este frame / baseline reciente, None
+// si aún no hay baseline) para no reimplementar el tracking acá. Por debajo de
+// este umbral, la DISTAL no se mide directo aunque su segmento no sea corto —
+// se deriva de PIP igual que cuando el segmento SÍ es corto.
+const HAND_SPAN_DEGRADED_RATIO = 0.3;
+
+// El nudillo (MCP, falange proximal) NO se mide con el mismo método que PIP/DIP:
+// su "segmento padre" es wrist→MCP, que en 3D apunta a través del ancho de la
+// palma — NO es paralelo a MCP→PIP (el eje del dedo) ni siquiera con la mano
+// extendida en reposo. PIP→DIP y DIP→TIP sí son ~paralelos entre sí (mismo dedo),
+// así que su ángulo 2D es estable bajo rotación 3D de brazo/muñeca; wrist→MCP vs
+// MCP→PIP no lo es: cualquier rotación fuera del plano de cámara (gesto de
+// acercar la mano a la otra) desalinea la proyección sin que el dedo se haya
+// flexionado. Validado con datos LSC50: en una seña de contacto (solo rotación,
+// sin cierre real) el ángulo wrist-MCP se dispara a 75-100°; en una seña de puño
+// real se queda en 8-14° pese a que PIP mide 100-120°. Es ruido, no señal.
+// Se deriva de PIP por el mismo acoplamiento tendinoso que DIP, en vez de
+// medirse — MCP flexiona algo menos que PIP en la mayoría de agarres.
+const MCP_PIP_COUPLING = 0.8;
+
+// Override del signo del giro de flexión por mano:
+//   0  → automático (se deduce del rig: hacia qué lado se curva el pulgar = palmar)
+//   ±1 → forzar ese signo (usar solo si el automático se equivoca; ver consola)
+// Los esqueletos de las dos manos están espejados, por eso se resuelve por mano.
+const FINGER_FLEX_SIGN = { Left: 0, Right: 0 };
+
+// true  → bisagra anatómica (flexión 1 eje por falange).
+// false → retargeting libre anterior (setFromUnitVectors por segmento), para A/B.
+const FINGER_HINGE = true;
 
 // Índices de landmarks MediaPipe Pose relevantes para cada brazo
 // 11=hombro_izq, 12=hombro_der, 13=codo_izq, 14=codo_der
@@ -45,6 +113,7 @@ const state = {
   boneRestLocalQ: new Map(),  // name → Quaternion local en rest (para resetPose)
   boneRestWorldQ: new Map(),  // name → Quaternion world en rest (para retargeting)
   boneRestDir:   new Map(),   // name → Vector3 dirección Y en world en rest
+  boneFlexAxis:  new Map(),   // name → Vector3 eje bisagra en frame local (falanges)
   frames: [],
   fps: 30,
   frameIdx: 0,
@@ -54,10 +123,22 @@ const state = {
   // Fracción [0,1] que avanza hacia el quaternion objetivo cada tick de rAF.
   // 0.12 ≈ convergencia en ~6 frames a 60fps (~100ms), buen balance suavidad/lag.
   smoothAlpha: 0.12,
-  // Normal de palma por mano, actualizada cada frame en applyHandOrientation.
-  // Usada por el loop de dedos para proyectar direcciones sobre el plano de la palma.
-  palmNormalL: new THREE.Vector3(0, 0, 1),
-  palmNormalR: new THREE.Vector3(0, 0, 1),
+  // Suavizado propio de las falanges. Con el retargeting libre (jittery) valía 0.06;
+  // la bisagra de 1 eje + clamp es mucho más estable → se puede subir sin temblor
+  // y así los dedos no se quedan "rígidos" a medio converger. (subir → más responsivo)
+  fingerAlpha: 0.18,
+  // Deadzone adaptativo: se ignora la rotación de una falange cuando su vector de
+  // segmento es más corto que fingerDeadzone × (largo de palma wrist→MCP medio).
+  // Evita rotar hacia ruido puro cuando el dedo casi no se mueve. (bundle dedos, punto B)
+  fingerDeadzone: 0.12,
+  // Deadzone durante CONTACT: mucho más chico. El propósito del deadzone es
+  // rechazar RUIDO de tracking en vivo — pero en CONTACT hand_corrector.py ya
+  // congeló la pose (mismos landmarks repetidos frame a frame, cero jitter por
+  // construcción), así que un segmento corto ahí no es ruido: es un dedo
+  // genuinamente flexionado (se acorta en la proyección 2D al doblarse). Con
+  // el deadzone normal (0.12), un puño real queda marcado "no confiable" y se
+  // relaja al rest — la mano no cierra durante el contacto (seña 0018).
+  fingerDeadzoneContact: 0.02,
   // Posiciones world de hombros y longitudes de segmentos de brazo en rest pose.
   // Se calcula una vez al cargar el GLB y se usa para el IK de brazos.
   armRest: {
@@ -72,10 +153,20 @@ const canvas   = document.getElementById("avatar-canvas");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+// Tone mapping: comprime las altas luces, evita el look "lavado" del IBL.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
 
 const scene  = new THREE.Scene();
 scene.background = new THREE.Color(0x0d0f1a);
 scene.fog = new THREE.Fog(0x0d0f1a, 8, 20);
+
+// Environment map (image-based lighting): sin esto el material glTF por defecto
+// (metalness=1) se ve plano y sin volumen. RoomEnvironment es un IBL sintético
+// que no requiere descargar un HDR.
+const _pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = _pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.45;  // el IBL era la fuente dominante → cuerpo lavado
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
 camera.position.set(0, 1.2, 2.8);
@@ -86,8 +177,9 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 camera.lookAt(controls.target);
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const key = new THREE.DirectionalLight(0xffffff, 1.2);
+// Ambient bajo: con scene.environment activo, un ambient alto aplana la forma.
+scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+const key = new THREE.DirectionalLight(0xffffff, 0.9);
 key.position.set(2, 4, 3);
 scene.add(key);
 const fill = new THREE.DirectionalLight(0x8090ff, 0.4);
@@ -121,6 +213,29 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 
   scene.add(gltf.scene);
 
+  // A/B test de la costura vertical central:
+  //   true  → recalcula normales suaves (tapa costuras oscuras de split normals,
+  //           pero puede crear una arista en la línea de simetría si las mitades
+  //           del mesh no están soldadas).
+  //   false → usa las normales originales del GLB.
+  const RECOMPUTE_NORMALS = false;
+  if (RECOMPUTE_NORMALS) {
+    gltf.scene.traverse(obj => {
+      if (obj.isMesh && obj.geometry) obj.geometry.computeVertexNormals();
+    });
+  }
+
+  // El GLB no trae materiales ni texturas: GLTFLoader asigna un material por
+  // defecto con metalness=1 que se ve plano. Lo reemplazamos por una piel mate.
+  const skinMat = new THREE.MeshStandardMaterial({
+    color: 0xa9785d,
+    roughness: 0.85,
+    metalness: 0.0,
+  });
+  gltf.scene.traverse(obj => {
+    if (obj.isMesh) obj.material = skinMat;
+  });
+
   // Centrar y escalar usando SOLO la geometría de las mallas visibles
   const meshBox = new THREE.Box3();
   gltf.scene.traverse(obj => { if (obj.isMesh && obj.visible) meshBox.expandByObject(obj); });
@@ -135,30 +250,124 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
   // Forzar actualización de matrices del mundo
   gltf.scene.updateWorldMatrix(true, true);
 
-  // Recopilar todos los huesos y guardar su estado de rest
-  gltf.scene.traverse(obj => {
-    if (!obj.isBone) return;
+  // Helper: registrar un objeto bone en el state
+  function registerBone(obj) {
+    if (state.bones.has(obj.name)) return;
     state.bones.set(obj.name, obj);
-
-    // Quaternion LOCAL en rest → para restaurar en resetPose()
     state.boneRestLocalQ.set(obj.name, obj.quaternion.clone());
-
-    // Quaternion WORLD en rest y dirección Y en world → para retargeting
     const wq = new THREE.Quaternion();
     obj.getWorldQuaternion(wq);
     state.boneRestWorldQ.set(obj.name, wq.clone());
     const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(wq).normalize();
     state.boneRestDir.set(obj.name, dir);
+  }
+
+  // Método 1: traverse estándar (funciona en la mayoría de modelos Rigify/Mixamo)
+  gltf.scene.traverse(obj => {
+    if (obj.isBone) registerBone(obj);
   });
 
+  // Método 2: fallback via SkinnedMesh.skeleton.bones
+  // (necesario para AutoRigPro y otros rigs donde isBone puede ser false)
+  gltf.scene.traverse(obj => {
+    if (obj.isSkinnedMesh && obj.skeleton) {
+      for (const bone of obj.skeleton.bones) registerBone(bone);
+    }
+  });
+
+  console.log("[SignAI] Bones encontrados:", state.bones.size);
+  console.log("[SignAI] Bone names:\n" + [...state.bones.keys()].sort().join("\n"));
+
   const fingerBones = [...state.bones.keys()].filter(n =>
-    /^(thumb|f_index|f_middle|f_ring|f_pinky)\d+[LR]$/.test(n));
+    /^(thumb|index|middle|ring|pinky)\d+[lr]$/.test(n));
   const nDEF = fingerBones.length;
+  console.log("[SignAI] Finger bones:", nDEF, fingerBones);
 
   // Medir rest pose de los brazos para el solver IK
   measureArmRest();
+  console.log("[SignAI] armRest:", JSON.stringify({
+    L_upperL: state.armRest.L_upperL, L_foreL: state.armRest.L_foreL,
+    L_upperR: state.armRest.L_upperR, L_foreR: state.armRest.L_foreR,
+  }));
+
+  // Derivar el eje de bisagra local de cada falange (flexión 1 eje)
+  measureFingerHinges();
 
   window._signAI = state;
+
+  // ── Debug: inspección de huesos de brazo/mano en la consola ─────────────
+  // window._dumpArm("r") / _dumpArm("l") — loguea quaternions local/world
+  // (Euler XYZ en grados) de mano/antebrazo/brazo en el frame ACTUALMENTE
+  // mostrado, más los landmarks crudos de esa mano y el estado del corrector
+  // (NORMAL/CONTACT/HOLD/BLEND). Solo lectura, sin efectos sobre el render.
+  window._dumpArm = function (side) {
+    const idx = Math.floor(state.frameIdx);
+    const frame = state.frames[idx];
+    if (!frame) { console.log("sin frame actual (¿cargaste una seña?)"); return; }
+    const label = side === "l" ? "Left" : "Right";
+    console.log(`— frame ${idx} — corrector_state=${frame._corrector_state ?? "NORMAL"} —`);
+
+    function eulerDeg(q) {
+      const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
+      return [e.x, e.y, e.z].map(r => +(r * 180 / Math.PI).toFixed(1));
+    }
+    function dump(name) {
+      const b = state.bones.get(name);
+      if (!b) { console.log(name + " NO ENCONTRADO"); return; }
+      const wq = new THREE.Quaternion();
+      b.getWorldQuaternion(wq);
+      const lq = [b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w].map(n => +n.toFixed(3));
+      console.log(
+        `${name}  parent=${b.parent ? b.parent.name : null}` +
+        `  localQ=[${lq.join(",")}]` +
+        `  localEulerDeg=[${eulerDeg(b.quaternion).join(",")}]` +
+        `  worldEulerDeg=[${eulerDeg(wq).join(",")}]`
+      );
+    }
+    ["hand" + side, "forearm_twist" + side, "forearm_stretch" + side, "arm_stretch" + side].forEach(dump);
+
+    const h = frame.hands?.find(x => x.hand === label);
+    if (h) {
+      const p = (i) => `${i}:(${h.landmarks[i].x.toFixed(3)},${h.landmarks[i].y.toFixed(3)},${h.landmarks[i].z.toFixed(3)})`;
+      console.log(`rawLms ${label} wrist=${p(0)} mid=${p(9)} idx=${p(5)} pinky=${p(17)}`);
+    } else {
+      console.log(`sin landmarks de mano ${label} en este frame`);
+    }
+  };
+
+  // window._stepTo(idx) — aplica un frame puntual sin depender del loop de
+  // rAF (que Chrome pausa en pestañas en background/automatizadas). Solo
+  // debug, mismo espíritu que _dumpArm: útil para inspección determinística.
+  window._stepTo = function (idx) {
+    state.frameIdx = idx;
+    const frame = state.frames[Math.floor(idx)];
+    if (!frame) { console.log("frame fuera de rango"); return; }
+    applyFrame(frame);
+  };
+
+  // window._stepFrom0(idx) — como _stepTo, pero re-ejecuta desde el frame 0
+  // (tras resetPose) para que el suavizado (slerp) llegue a `idx` con el
+  // mismo historial de convergencia que tendría en reproducción normal, en
+  // vez de partir de donde haya quedado el estado actual.
+  window._stepFrom0 = function (idx) {
+    resetPose();
+    for (let i = 0; i <= idx; i++) window._stepTo(i);
+  };
+
+  // window._stepRealistic(idx, callsPerFrame=3) — como _stepFrom0, pero
+  // llama applyFrame varias veces por frame de contenido, igual que la
+  // reproducción real: animTick corre en cada refresco de pantalla (~60Hz),
+  // no en cada frame de contenido (24fps) — el suavizado (slerp) converge
+  // ~2-3 veces más por frame en vivo que con _stepFrom0 (una sola llamada).
+  // Encontrado en sesión 2026-09-13: un caso se veía distinto en vivo que
+  // con _stepFrom0 por esta diferencia. Usar este para depurar de ahora en
+  // más — _stepFrom0 puede subestimar cuánto convergió una pose en pantalla.
+  window._stepRealistic = function (idx, callsPerFrame = 3) {
+    resetPose();
+    for (let i = 0; i <= idx; i++) {
+      for (let c = 0; c < callsPerFrame; c++) window._stepTo(i);
+    }
+  };
 
   setStatus(`Avatar listo — ${state.bones.size} huesos (${nDEF} dedos)`, "ok");
   document.getElementById("avatar-meta").textContent = `${state.bones.size} huesos · ${nDEF} dedos`;
@@ -175,8 +384,8 @@ new GLTFLoader().load("/avatar.glb", (gltf) => {
 // Captura posiciones y longitudes de los brazos desde la rest pose del GLB.
 function measureArmRest() {
   const g  = state.armRest;
-  const bSL = state.bones.get("DEF-upper_armL"), bEL = state.bones.get("DEF-forearmL"), bWL = state.bones.get("DEF-handL");
-  const bSR = state.bones.get("DEF-upper_armR"), bER = state.bones.get("DEF-forearmR"), bWR = state.bones.get("DEF-handR");
+  const bSL = state.bones.get("arm_stretchl"), bEL = state.bones.get("forearm_stretchl"), bWL = state.bones.get("handl");
+  const bSR = state.bones.get("arm_stretchr"), bER = state.bones.get("forearm_stretchr"), bWR = state.bones.get("handr");
   if (!bSL || !bEL || !bWL || !bSR || !bER || !bWR) return;
   const eL = new THREE.Vector3(), wL = new THREE.Vector3();
   const eR = new THREE.Vector3(), wR = new THREE.Vector3();
@@ -193,14 +402,17 @@ const _ikEHint = new THREE.Vector3();
 const _ikElbow = new THREE.Vector3();
 const _ikTT    = new THREE.Vector3(); // toTarget (scratch IK)
 const _ikPole  = new THREE.Vector3();
+const _ikTargetDir = new THREE.Vector3(); // dirección hombro→muñeca (scratch, bias de codo)
+const _ikPoleHat   = new THREE.Vector3(); // codo real normalizado (scratch, bias de codo)
+const _ikPerp      = new THREE.Vector3(); // componente ⊥ del codo real (scratch, bias de codo)
 
 function lmWorldOffset(lm, lmRef, scale, worldRef, out) {
-  // z del landmark es "proporcional al ancho de imagen" — usar el mismo scale xy amplifica
-  // demasiado (delta_z≈0.387 * scale≈3.13 = 1.21, pero el brazo mide 0.52).
-  // Factor empírico 0.12 da extensión razonable (~0.15 u) sin salir del alcance del brazo.
-  // Signo: MediaPipe z disminuye cuando la muñeca está frente al cuerpo (más cerca cámara).
-  // -(delta_z) es positivo cuando la mano está adelante → Three.js +z = hacia la cámara = correcto.
-  const Z_SCALE = 0.40;
+  // Análisis de datos reales (sign 0005, frame 20 — manos juntas):
+  //   Pose wrist z relativo a hombro ≈ -0.40. Con Z_SCALE=0.40 y scale≈3 → 0.48 u forward.
+  //   Pero el brazo mide solo 0.507 u → casi todo el alcance se va en z, las manos
+  //   no pueden llegar al centro del cuerpo en x,y. Reducir a 0.15 libera ~0.47 u de
+  //   alcance en x,y manteniendo presencia 3D para señas con manos hacia la cámara.
+  const Z_SCALE = 0.15;
   return out.set(
     (lm.x - lmRef.x) * scale,
     -(lm.y - lmRef.y) * scale,
@@ -242,37 +454,120 @@ function solveIKElbow(shoulder, target, pole, L1, L2) {
     .addScaledVector(pole, sinA * L1);
 }
 
-function applyArmIK(body) {
+// Scratch para IK de contacto
+const _ikContactMid = new THREE.Vector3();
+const _ikWristL     = new THREE.Vector3();
+const _ikWristR     = new THREE.Vector3();
+
+// Factor de fusión durante CONTACT: 0 = sin efecto, 1 = ambas muñecas al midpoint exacto.
+// Con 0.8, medido en datos reales (seña 0018, contacto lateral mano-a-mano, no
+// solapado): la separación real entre muñecas es ~0.22-0.36 u (bodyScale
+// aplicado), y 0.8 la reducía a ~0.04-0.07 u — MENOS que el ancho de una mano
+// (~0.075 u estimado) → no queda espacio físico para las dos manos lado a lado,
+// los brazos se cruzan en vez de acercarse (seña 0018: "debería ponerlas una al
+// lado de la otra"). 0.35 deja ~0.15-0.25 u — se ven claramente juntas sin
+// forzar un solapamiento que la geometría no puede resolver sin cruzarse.
+const CONTACT_BLEND = 0.35;
+
+// Sesgo lateral del codo hacia afuera (fracción del alcance del brazo). En señas
+// frente al pecho los targets de muñeca caen cerca de la línea media → sin esto
+// los codos colapsan contra las costillas y los antebrazos se pegan al torso.
+// Se atenúa cuando la mano sube (con el brazo en alto el codo real ya define
+// bien la pose y forzar "afuera" produce un ala de pollo).
+const ELBOW_OUT = 0.18;
+
+// Empuje del target de muñeca hacia la cámara cuando queda cerca del torso y a la
+// altura del pecho o más arriba → la mano/antebrazo pasan POR DELANTE del cuerpo
+// en vez de atravesarlo (fracción del alcance del brazo).
+const TORSO_CLEAR = 0.30;
+
+// Umbral de "confiabilidad" del codo real (landmark 13/14) para decidir si el
+// sesgo anatómico de abajo (cuelgue + frontal) hace falta. Se mide como
+// sin(ángulo) entre el codo real y la línea hombro→muñeca: 0 = colineal
+// (degenerado, el solver no puede derivar giro), 1 = perpendicular (dato
+// pleno). Validado sobre las 1000 señas de LSC50: el caso colineal
+// (sin<0.3) es raro — mediana 0% de frames, máx ~22% en la peor seña — así
+// que antes el sesgo se aplicaba a full fuerza siempre, ahogando el dato
+// real de codo el resto del tiempo. Con este umbral el sesgo solo entra
+// cuando el dato real no alcanza para definir el giro.
+const ELBOW_POLE_PURITY_THRESH = 0.3;
+
+function applyArmIK(body, handsArr, frameState) {
   if (!state.armRest.L_upperL) return; // measureArmRest aún no corrió
   const scale = bodyScale(body);
   const g = state.armRest;
 
-  _applyOneArm(body, 11, 13, 15,
-    "DEF-upper_armL", "DEF-upper_armL001", "DEF-forearmL", "DEF-forearmL001",
+  // Calcular targets base de muñeca (relativo a su propio hombro — comportamiento natural)
+  lmWorldOffset(body[15], body[11], scale, g.shoulderL, _ikWristL);
+  lmWorldOffset(body[16], body[12], scale, g.shoulderR, _ikWristR);
+
+  // ── CONTACT: fundir ambas muñecas hacia su punto medio ────────────────────
+  // En señas de contacto, las muñecas están a ~0.32 u de separación aún cuando las
+  // palmas se tocan. Aquí las acercamos explícitamente al midpoint cuando el corrector
+  // detecta CONTACT, de modo que las manos se "junten" visualmente en el avatar.
+  if (frameState === 'CONTACT') {
+    _ikContactMid.addVectors(_ikWristL, _ikWristR).multiplyScalar(0.5);
+    _ikWristL.lerp(_ikContactMid, CONTACT_BLEND);
+    _ikWristR.lerp(_ikContactMid, CONTACT_BLEND);
+  }
+
+  _applyOneArm(body, 11, 13, _ikWristL,
+    "arm_stretchl", null, "forearm_stretchl", null,
     g.shoulderL, g.L_upperL, g.L_foreL, scale);
 
-  _applyOneArm(body, 12, 14, 16,
-    "DEF-upper_armR", "DEF-upper_armR001", "DEF-forearmR", "DEF-forearmR001",
+  _applyOneArm(body, 12, 14, _ikWristR,
+    "arm_stretchr", null, "forearm_stretchr", null,
     g.shoulderR, g.L_upperR, g.L_foreR, scale);
 }
 
-function _applyOneArm(body, iS, iE, iW,
+function _applyOneArm(body, iS, iE, wristTarget,
     nUA, nUA1, nFA, nFA1, shoulderWorld, L1, L2, scale) {
   if (L1 < 1e-6 || L2 < 1e-6) return;
 
-  lmWorldOffset(body[iW], body[iS], scale, shoulderWorld, _ikWrist);
+  // El target de la muñeca ya viene calculado (y posiblemente ajustado por CONTACT).
+  // El codo se calcula relativo al hombro propio (solo sirve de dirección para el polo).
+  _ikWrist.copy(wristTarget);
   lmWorldOffset(body[iE], body[iS], scale, shoulderWorld, _ikEHint);
 
-  // Vector de polo = dirección del codo desde el hombro.
-  // Problema: cuando la mano está por encima del hombro, el vector codo→hombro
-  // y el vector hombro→muñeca son casi paralelos → después de proyectar, el polo
-  // residual es ≈0 y el solver pone el codo en dirección arbitraria.
-  // Fix: añadir un componente descendente fuerte para que el codo siempre cuelgue
-  // por debajo de la línea hombro-muñeca (posición anatómica en LSC),
-  // más un pequeño bias frontal para compensar la subestimación de z normalizado.
+  const reach = L1 + L2;
+
+  // Anti-clip: mano cerca de la línea media + a la altura del pecho o más arriba
+  // → empujar el target hacia la cámara para que pase por delante del torso.
+  const nearBody = THREE.MathUtils.clamp(
+    1 - Math.abs(_ikWrist.x - shoulderWorld.x) / (reach * 0.6), 0, 1);
+  const chestUp  = THREE.MathUtils.clamp(
+    (_ikWrist.y - (shoulderWorld.y - reach * 0.5)) / (reach * 0.7), 0, 1);
+  _ikWrist.z += nearBody * chestUp * reach * TORSO_CLEAR;
+
+  // Vector de polo = dirección del codo desde el hombro (dato real de MediaPipe).
+  // Problema original: cuando la mano está por encima del hombro, el vector
+  // codo→hombro y el vector hombro→muñeca son casi paralelos → después de
+  // proyectar, el polo residual es ≈0 y el solver pone el codo en dirección
+  // arbitraria. El fix (bias descendente + frontal) es necesario ahí, pero
+  // se aplicaba SIEMPRE a full fuerza — `degenerate` lo escala por qué tan
+  // colineal está el dato real, así que el codo real domina el resto del
+  // tiempo (ver ELBOW_POLE_PURITY_THRESH).
   _ikPole.subVectors(_ikEHint, shoulderWorld);
-  _ikPole.y -= (L1 + L2) * 0.35; // codo hacia abajo (anatómico)
-  _ikPole.z += (L1 + L2) * 0.10; // leve bias frontal
+
+  _ikTargetDir.subVectors(_ikWrist, shoulderWorld).normalize();
+  let degenerate = 1;
+  const poleLen = _ikPole.length();
+  if (poleLen > 1e-6) {
+    _ikPoleHat.copy(_ikPole).divideScalar(poleLen);
+    const par = _ikPoleHat.dot(_ikTargetDir);
+    _ikPerp.copy(_ikPoleHat).addScaledVector(_ikTargetDir, -par);
+    const purity = _ikPerp.length(); // sin(ángulo): 0 colineal … 1 perpendicular
+    degenerate = THREE.MathUtils.clamp(1 - purity / ELBOW_POLE_PURITY_THRESH, 0, 1);
+  }
+
+  _ikPole.y -= reach * 0.35 * degenerate;  // codo hacia abajo — solo si el dato real es ambiguo
+  _ikPole.z += reach * 0.10 * degenerate;  // leve bias frontal — idem
+
+  // Codo hacia afuera, atenuado a medida que la muñeca sube por encima del hombro
+  // (raise: 1 con la mano baja → 0.1 con la mano bien alta).
+  const raise = THREE.MathUtils.clamp(
+    1 - (_ikWrist.y - shoulderWorld.y + reach * 0.1) / (reach * 0.4), 0.1, 1);
+  _ikPole.x += Math.sign(shoulderWorld.x) * reach * ELBOW_OUT * raise;
 
   solveIKElbow(shoulderWorld, _ikWrist, _ikPole, L1, L2);
   // _ikElbow ← posición del codo resuelto por IK
@@ -308,8 +603,15 @@ const _hIdxV = new THREE.Vector3();
 const _hPnkV = new THREE.Vector3();
 const _hNorm = new THREE.Vector3();
 const _hSide = new THREE.Vector3();
+const _hCross = new THREE.Vector3(); // ángulo con signo del roll (ver applyHandOrientation paso 2)
 const _hMat  = new THREE.Matrix4();
 const _hQ    = new THREE.Quaternion();
+
+// Scratch para la bisagra de falanges
+const _flexDelta   = new THREE.Quaternion();
+const _flexTargetL = new THREE.Quaternion();
+const _segP        = new THREE.Vector3();
+const _segC        = new THREE.Vector3();
 
 function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
   const restDir    = state.boneRestDir.get(bone.name);
@@ -333,6 +635,93 @@ function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
   bone.updateMatrixWorld(true);
 }
 
+// ── Bisagra anatómica por falange ────────────────────────────────────────────
+
+// Fija un vector al eje cardinal (±X/±Y/±Z) más cercano. Limpia el eje bisagra
+// de residuos oblicuos → la falange gira sobre 1 solo eje exacto.
+function snapToCardinal(v) {
+  const ax = Math.abs(v.x), ay = Math.abs(v.y), az = Math.abs(v.z);
+  if (ax >= ay && ax >= az)      v.set(Math.sign(v.x) || 1, 0, 0);
+  else if (ay >= ax && ay >= az) v.set(0, Math.sign(v.y) || 1, 0);
+  else                           v.set(0, 0, Math.sign(v.z) || 1);
+  return v;
+}
+
+// Deriva, una vez cargado el rig, el eje de bisagra local de cada falange de
+// index/middle/ring/pinky. El eje es ⊥ al eje largo del dedo y ⊥ a la normal de
+// la palma (rest pose): girar +ángulo sobre él flexiona la falange hacia la palma.
+function measureFingerHinges() {
+  state.boneFlexAxis.clear();
+  for (const side of ["l", "r"]) {
+    const wristB = state.bones.get("hand" + side);
+    const idxB   = state.bones.get("index1" + side);
+    const pnkB   = state.bones.get("pinky1" + side);
+    if (!wristB || !idxB || !pnkB) continue;
+
+    const w = new THREE.Vector3(), i = new THREE.Vector3(), p = new THREE.Vector3();
+    wristB.getWorldPosition(w); idxB.getWorldPosition(i); pnkB.getWorldPosition(p);
+
+    // Normal del plano de la palma en world (wrist→index × wrist→pinky). Su signo
+    // es arbitrario (dorsal o palmar); girar +ángulo sobre hinge = restDir × palmN
+    // hace que la punta de la falange se mueva hacia +palmN.
+    const palmN = new THREE.Vector3()
+      .crossVectors(i.clone().sub(w), p.clone().sub(w))
+      .normalize();
+    if (palmN.lengthSq() < 1e-10) continue;
+
+    // ¿Hacia qué lado del plano de palma está +palmN, dorsal o palmar? El pulgar
+    // se curva hacia la palma → la dirección thumb1→thumb3 tiene componente palmar.
+    const tb = new THREE.Vector3(), tt = new THREE.Vector3();
+    const tbB = state.bones.get("thumb1" + side), ttB = state.bones.get("thumb3" + side);
+    let auto = 1, pc = 0;
+    if (tbB && ttB) {
+      tbB.getWorldPosition(tb); ttB.getWorldPosition(tt);
+      pc = palmN.dot(tt.sub(tb));       // >0 → +palmN es palmar ; <0 → es dorsal
+      auto = pc >= 0 ? 1 : -1;
+    }
+    const override = side === "l" ? FINGER_FLEX_SIGN.Left : FINGER_FLEX_SIGN.Right;
+    const sign = override !== 0 ? override : auto;
+
+    for (const fam of HINGE_FINGERS) {
+      for (let k = 1; k <= 3; k++) {
+        const name    = `${fam}${k}${side}`;
+        const restWQ  = state.boneRestWorldQ.get(name);
+        const restDir = state.boneRestDir.get(name); // eje largo (Y local) en world
+        if (!state.bones.has(name) || !restWQ || !restDir) continue;
+
+        const hingeW = new THREE.Vector3()
+          .crossVectors(restDir, palmN)
+          .multiplyScalar(sign);
+        if (hingeW.lengthSq() < 1e-10) continue;
+        hingeW.normalize();
+
+        // A frame local del hueso y snap a eje cardinal → bisagra de 1 eje exacto.
+        const hingeL = hingeW.applyQuaternion(restWQ.clone().invert());
+        snapToCardinal(hingeL);
+        state.boneFlexAxis.set(name, hingeL);
+      }
+    }
+
+    console.log(`[SignAI] hinge ${side}: sign=${sign} (auto=${auto}, pc=${pc.toFixed(3)}, override=${override})`);
+  }
+  console.log("[SignAI] Ejes bisagra de falange:", state.boneFlexAxis.size);
+}
+
+// Flexiona una falange 'angle' rad sobre su eje bisagra local, partiendo del rest.
+// Garantiza: 1 solo eje, sin torsión, rango clampeado. Suavizado por slerp.
+function flexFinger(bone, angle, alpha = state.fingerAlpha) {
+  const axis  = state.boneFlexAxis.get(bone.name);
+  const restL = state.boneRestLocalQ.get(bone.name);
+  if (!axis || !restL) return;
+
+  const a = THREE.MathUtils.clamp(angle, FLEX_MIN_RAD, FLEX_MAX_RAD);
+  _flexDelta.setFromAxisAngle(axis, a);
+  _flexTargetL.multiplyQuaternions(restL, _flexDelta); // rest ∘ flexión (local)
+
+  bone.quaternion.slerp(_flexTargetL, alpha);
+  bone.updateMatrixWorld(true);
+}
+
 // Orienta la muñeca con roll completo (giro alrededor del eje del dedo).
 //
 // Dos pasos:
@@ -344,19 +733,60 @@ function rotateBone(bone, targetDir, alpha = state.smoothAlpha) {
 // normalSign: +1 si cross(idx,pnk) apunta hacia la palma en world-space (mano izquierda),
 //             -1 si apunta en sentido contrario (mano derecha — los dedos aparecen
 //             en orden inverso en la imagen porque la mano está espejada).
-function applyHandOrientation(bone, rawLms, normalSign) {
+// Factor para el z crudo de MediaPipe Hands en la orientación de muñeca.
+// z tiene span ~0.014 en toda la mano y es ruidoso → a escala 1.0 hacía que la
+// muñeca temblara/torciera. A 0.3 conserva la señal de "palma hacia/desde cámara"
+// con ~3× menos ruido. (bundle dedos, punto E)
+const Z_HAND = 0.3;
+
+function applyHandOrientation(bone, rawLms, normalSign, contactMode = false) {
   const w = rawLms[0];
 
-  // ── Paso 1: alinear eje Y del hueso al dedo medio ───────────────────────
-  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z));
-  if (_hUp.lengthSq() < 1e-8) return;
-  _hUp.normalize();
+  // ── Paso 1: alinear eje Y del hueso (hacia dónde "apunta" la mano) ──────
+  // rawLms[9] (dedo medio) ya NO es necesariamente una pose vieja congelada
+  // en CONTACT: hand_corrector.py decide dedo por dedo (ver _contact_hand) —
+  // "middle" (familia que incluye el landmark 9) es dato crudo real cuando
+  // MediaPipe lo sigue viendo, y solo se sostiene el último bueno conocido
+  // si ese frame puntual no es plausible. Se usa igual que en NORMAL.
+  _hUp.set(rawLms[9].x - w.x, -(rawLms[9].y - w.y), -(rawLms[9].z - w.z) * Z_HAND);
+  if (_hUp.lengthSq() < 1e-8) {
+    if (!(contactMode && bone.parent)) return;
+    // Dato degenerado (mano recién detectada, sin referencia aún) → eje Y
+    // del antebrazo como respaldo (mismo proxy que se usaba siempre antes).
+    bone.parent.getWorldQuaternion(_hQ);
+    _hUp.set(0, 1, 0).applyQuaternion(_hQ);
+  } else {
+    _hUp.normalize();
+  }
   rotateBone(bone, _hUp); // slerp incluido
 
   // ── Paso 2: roll — girar el hueso para que su Z apunte a la normal de palma ──
-  _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z));
-  _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z));
+  // Se SALTA por completo durante CONTACT (ver más abajo, tras calcular
+  // `_hNorm`) — no se puede confiar en la fuente de este dato ahí.
+  _hIdxV.set(rawLms[5].x  - w.x, -(rawLms[5].y  - w.y), -(rawLms[5].z  - w.z) * Z_HAND);
+  _hPnkV.set(rawLms[17].x - w.x, -(rawLms[17].y - w.y), -(rawLms[17].z - w.z) * Z_HAND);
   _hNorm.crossVectors(_hIdxV, _hPnkV).multiplyScalar(normalSign);
+
+  // Bug encontrado con datos reales (seña 0018, frames 26→27, sesión
+  // 2026-09-13): wrist→índice y wrist→meñique quedan casi paralelos en esta
+  // proyección (2D + Z amortiguada) — su cross product (`_hNorm`, la normal
+  // de palma) tiene magnitud minúscula EN GENERAL para esta seña (mediana
+  // 0.00043 en las 98 frames, no es un frame puntual degenerado) → un umbral
+  // de magnitud no distingue "dato malo" de "dato normal" aquí (a diferencia
+  // de otros vectores de este archivo) y un filtro de paso bajo tampoco
+  // ayuda: el cambio de signo no es un parpadeo de un frame, se sostiene en
+  // los frames siguientes (confirmado con datos: z pasa de -0.93 a +0.88 en
+  // 26→27 y se queda positivo). Con esa magnitud, CUALQUIER dirección
+  // extraída es esencialmente ruido — un roll de ~180° de la mano entera
+  // (dedos ya bien flexionados quedan apuntando a un eje absurdo, visible
+  // como "gancho" en pantalla). Confirmado aislando: resetear SOLO el hueso
+  // de la mano a rest (dejando los dedos intactos) elimina el gancho.
+  // Fix: no confiar en absoluto en esta normal durante CONTACT — mantener el
+  // roll tal como quedó del paso 1 (sin girar sobre el eje Y). Ya en NORMAL,
+  // antes/después del contacto, la mano no suele estar tan de canto y esta
+  // señal vuelve a ser razonable.
+  if (contactMode) return;
+
   if (_hNorm.lengthSq() < 1e-8) return;
   _hNorm.normalize();
   // Proyectar la normal para que sea perpendicular al eje Y (dedo)
@@ -371,8 +801,25 @@ function applyHandOrientation(bone, rawLms, normalSign) {
   _hSide.addScaledVector(_hUp, -_hSide.dot(_hUp)).normalize();
   if (_hSide.lengthSq() < 1e-8) return;
 
-  // Delta de roll: rotar el Z actual hacia la normal objetivo
-  _dQ.setFromUnitVectors(_hSide, _hNorm);
+  // Delta de roll: ángulo CON SIGNO entre _hSide y _hNorm alrededor de _hUp,
+  // en vez de THREE.Quaternion.setFromUnitVectors(_hSide, _hNorm).
+  // Motivo (encontrado leyendo el código, sin asumir el bug viejo de rig):
+  // ambos vectores ya están proyectados ⊥ a _hUp arriba, así que el eje de
+  // giro correcto SIEMPRE es _hUp. Pero setFromUnitVectors no lo sabe — es
+  // genérico para dos vectores cualesquiera — y su propia implementación,
+  // cuando el roll necesario se acerca a 180° (dot ≈ -1, la mano necesita un
+  // giro grande), cae a un eje ARBITRARIO derivado solo de las componentes
+  // de _hSide (fallback interno de three.js para el caso casi-antiparalelo),
+  // sin relación con _hUp ni con _hNorm. Eso mete un giro fuera de eje justo
+  // cuando el roll pendiente es más grande — candidato fuerte a la asimetría
+  // observada en CONTACT (una mano con más roll pendiente que la otra cae en
+  // esa zona inestable, la otra no). Con ángulo con signo + setFromAxisAngle
+  // el eje es _hUp exacto siempre, sin discontinuidad cerca de 180°.
+  const _rollCos = THREE.MathUtils.clamp(_hSide.dot(_hNorm), -1, 1);
+  _hCross.crossVectors(_hSide, _hNorm);
+  const _rollSign = Math.sign(_hCross.dot(_hUp)) || 1;
+  const _rollAngle = Math.atan2(_rollSign * _hCross.length(), _rollCos);
+  _dQ.setFromAxisAngle(_hUp, _rollAngle);
 
   // Nuevo quaternion world = roll_delta * current_world_Q
   _tWQ.multiplyQuaternions(_dQ, _hQ);
@@ -386,10 +833,6 @@ function applyHandOrientation(bone, rawLms, normalSign) {
   }
   bone.quaternion.slerp(_tLQ, state.smoothAlpha); // roll suavizado igual que Y
   bone.updateMatrixWorld(true);
-
-  // Guardar normal de palma para que el loop de dedos proyecte sobre este plano
-  if (bone.name === "DEF-handL") state.palmNormalL.copy(_hNorm);
-  else                           state.palmNormalR.copy(_hNorm);
 }
 
 // ── Animación facial ─────────────────────────────────────────────────────────
@@ -476,9 +919,11 @@ function applyFace(face) {
 }
 
 function applyFrame(frameData) {
+  const frameState = frameData._corrector_state ?? 'NORMAL';
+
   // ── Brazos: IK de 2 huesos hacia la posición real de la muñeca ───────────
   if (frameData.body) {
-    applyArmIK(frameData.body);
+    applyArmIK(frameData.body, frameData.hands, frameState);
   }
   // ── Cara: mandíbula y cejas ───────────────────────────────────────────────
   if (frameData.face) {
@@ -491,30 +936,99 @@ function applyFrame(frameData) {
   for (const h of frameData.hands) handsMap[h.hand] = h.landmarks;
 
   // Orientación completa de la muñeca (incluye roll) antes de animar dedos
-  const bHL = state.bones.get("DEF-handL");
-  const bHR = state.bones.get("DEF-handR");
+  const bHL = state.bones.get("handl");
+  const bHR = state.bones.get("handr");
   // normalSign +1 para mano izquierda (cross(idx,pnk) apunta hacia la palma),
   // -1 para mano derecha (los dedos aparecen en orden inverso → normal al revés).
-  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1);
-  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1);
+  const inContact = frameState === 'CONTACT';
+  if (bHL && handsMap["Left"])  applyHandOrientation(bHL, handsMap["Left"],   1, inContact);
+  if (bHR && handsMap["Right"]) applyHandOrientation(bHR, handsMap["Right"], -1, inContact);
 
-  for (const [boneName, lmStart, lmEnd] of BONE_MAP) {
-    const bone = state.bones.get(boneName);
-    if (!bone) continue;
+  // Escala de cada mano = largo de palma (wrist → MCP medio), base del deadzone.
+  const handSpan = {};
+  for (const s of ["Left", "Right"]) {
+    const lm = handsMap[s];
+    if (lm) handSpan[s] = mpToThree(lm[9], lm[0]).length();
+  }
 
-    const side      = boneName.endsWith("L") ? "Left" : "Right";
-    const rawLms    = handsMap[side];
-    if (!rawLms) continue;
+  // ── Dedos: bisagra anatómica por falange ────────────────────────────────
+  // Cada falange de thumb/index/middle/ring/pinky gira sobre UN eje (flexión
+  // 0–~100°, sin torsión ni abducción). El ángulo es el giro 2D en el plano de
+  // imagen entre la falange previa y la actual — buen proxy de la flexión total
+  // cuando la mano mira a cámara; se subestima con el dedo en escorzo (lo
+  // compensa FLEX_GAIN).
+  for (const [fam, lm] of Object.entries(FINGER_LM)) {
+    for (const side of ["Left", "Right"]) {
+      const rawLms = handsMap[side];
+      if (!rawLms) continue;
+      const sfx  = side === "Left" ? "l" : "r";
+      const span = handSpan[side] ?? 0;
+      const hinge = FINGER_HINGE && HINGE_FINGERS.includes(fam);
+      const deadzone = frameState === 'CONTACT' ? state.fingerDeadzoneContact : state.fingerDeadzone;
+      // undefined (recién detectada, sin baseline aún) → no degradado, benefit of the doubt.
+      const spanRatio = frameData._hand_span_ratio?.[side];
+      const spanDegraded = spanRatio != null && spanRatio < HAND_SPAN_DEGRADED_RATIO;
 
-    const palmNorm  = side === "Left" ? state.palmNormalL : state.palmNormalR;
-    const wrist     = rawLms[0];
-    const dir = mpToThree(rawLms[lmEnd], wrist).sub(mpToThree(rawLms[lmStart], wrist));
+      // Paso 1: ángulo de flexión y fiabilidad de las 3 falanges.
+      // bend[k] = giro 2D (falange previa → actual) × FLEX_GAIN ; rel[k] = señal fiable.
+      const bend = [0, 0, 0], rel = [false, false, false], seg = [0, 0, 0];
+      for (let k = 1; k <= 3; k++) {
+        const cA = rawLms[lm[k - 1]], cB = rawLms[lm[k]];
+        const pA = k === 1 ? rawLms[0]     : rawLms[lm[k - 2]];
+        const pB = k === 1 ? rawLms[lm[0]] : rawLms[lm[k - 1]];
+        _segC.set(cB.x - cA.x, -(cB.y - cA.y), 0);
+        _segP.set(pB.x - pA.x, -(pB.y - pA.y), 0);
+        seg[k - 1]  = _segC.clone();
+        // Deadzone adaptativo (punto B): falange más corta que el piso de ruido
+        // (dedo en escorzo, mano colgando) o segmento padre por debajo del mismo
+        // piso → no fiable. El segmento padre de esta falange (`_segP`) es EL
+        // MISMO vector que ya se evaluó como `_segC` en la iteración anterior
+        // (k-1) — si ahí no alcanzó el piso de ruido (`rel[k-2]` = false), aquí
+        // NO puede tratarse como confiable solo porque no es exactamente cero.
+        // Bug encontrado con datos reales (seña 0018, frame 49, fuera de
+        // CONTACT): con la falange PIP marcada no-fiable (`rel[1]=false`, su
+        // segmento PIP→DIP por debajo del piso), la DISTAL igual se marcaba
+        // fiable (`rel[2]=true`, solo exigía "no cero") y medía el ángulo
+        // contra ese mismo segmento ruidoso → ángulos DIP de 200°+ ya en
+        // NORMAL, sin relación con hand_corrector.py ni con CONTACT.
+        rel[k - 1]  = _segC.length() >= span * deadzone && _segP.length() >= span * deadzone
+          && !(k === 3 && spanDegraded); // ver HAND_SPAN_DEGRADED_RATIO
+        bend[k - 1] = rel[k - 1] ? _segP.angleTo(_segC) * FLEX_GAIN : 0;
+      }
+      // La distal sigue a la media si su propia señal no llega (acoplamiento tendinoso).
+      if (hinge && !rel[2] && rel[1]) { bend[2] = bend[1] * DIP_PIP_COUPLING; rel[2] = true; }
 
-    // Proyectar sobre el plano de la palma: elimina la componente perpendicular
-    // a la palma que en video monocular es ruido puro.
-    dir.addScaledVector(palmNorm, -dir.dot(palmNorm));
+      // El nudillo (MCP, k=0) se descarta SIEMPRE que se mida directo — no es
+      // ruido ocasional, es sistemáticamente no confiable (ver MCP_PIP_COUPLING) —
+      // y se deriva de PIP en su lugar. Solo aplica a dedos con bisagra (ahora
+      // incluye al pulgar — ver HINGE_FINGERS).
+      if (hinge) {
+        if (rel[1]) { bend[0] = bend[1] * MCP_PIP_COUPLING; rel[0] = true; }
+        else        { rel[0] = false; }
+      }
 
-    rotateBone(bone, dir);
+      // DEBUG temporal (Foco D) — activar en consola con: window._fingerDebug = true
+      if (window._fingerDebug && hinge) {
+        const deg = bend.map(b => Math.round(b * 180 / Math.PI));
+        console.log(`[FD] f=${Math.floor(state.frameIdx)} ${side} ${fam} bend°=[${deg}] rel=[${rel}] span=${span.toFixed(4)} dz=${deadzone} state=${frameState}`);
+      }
+
+      // Paso 2: aplicar a cada hueso. Señal no fiable → relajar hacia el rest en
+      // vez de congelar la última pose (si no, la mano queda "en garra" al bajar).
+      for (let k = 1; k <= 3; k++) {
+        const bone = state.bones.get(`${fam}${k}${sfx}`);
+        if (!bone) continue;
+
+        if (!rel[k - 1]) {
+          const restL = state.boneRestLocalQ.get(bone.name);
+          if (restL) { bone.quaternion.slerp(restL, state.fingerAlpha * 0.5); bone.updateMatrixWorld(true); }
+        } else if (hinge) {
+          flexFinger(bone, bend[k - 1], state.fingerAlpha);
+        } else {
+          rotateBone(bone, seg[k - 1], state.fingerAlpha);   // pulgar / A-B libre
+        }
+      }
+    }
   }
 }
 

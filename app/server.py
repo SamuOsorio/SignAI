@@ -12,11 +12,18 @@ import functools
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
 from flask import Flask, jsonify, send_file, abort, send_from_directory
+
+# HandCorrector: corrige oclusión, saltos y pérdida de tracking en landmarks de mano
+# PoseFilter: filtro temporal (One-Euro) para landmarks de cuerpo (hombro/codo/muñeca)
+sys.path.insert(0, str(Path(__file__).parent))
+from hand_corrector import HandCorrector
+from pose_filter import PoseFilter
 
 BASE         = Path(__file__).parent.parent
 LSC50_LEFT   = BASE / "data" / "LANDMARKS" / "HANDS_LANDMARKS" / "LEFT_HAND_LANDMARKS"
@@ -110,6 +117,12 @@ def load_sign_landmarks(sign_id: str) -> dict:
     body_frames  = parse_body_csv(LSC50_BODY  / f"{sign_id}.csv")
     face_frames  = parse_face_csv(LSC50_FACE  / f"{sign_id}.csv")
 
+    # Suavizar landmarks de cuerpo (hombro/codo/muñeca) antes del IK de brazos —
+    # crudos, tienen ~12x más jitter en muñeca que en hombro (ver pose_filter.py).
+    if body_frames:
+        pose_filter = PoseFilter()
+        body_frames = [pose_filter.apply(f) for f in body_frames]
+
     n = max(len(left_frames), len(right_frames))
     if n == 0:
         return None
@@ -132,6 +145,9 @@ def load_sign_landmarks(sign_id: str) -> dict:
             frame["face"] = face_frames[i]
         frames.append(frame)
 
+    # Aplicar corrección de landmarks (CONTACT/HOLD/BLEND)
+    corrected_frames, stats = HandCorrector().process_sequence(frames)
+
     return {
         "stem":            sign_id,
         "fps":             24,
@@ -139,7 +155,13 @@ def load_sign_landmarks(sign_id: str) -> dict:
         "frames_with_hand": n,
         "detection_rate":  1.0,
         "source":          "lsc50",
-        "frames":          frames,
+        "frames":          corrected_frames,
+        "corrector_stats": {
+            "contact": stats["contact_frames"],
+            "hold_l":  stats["hold_l_frames"],
+            "hold_r":  stats["hold_r_frames"],
+            "blend":   stats["blend_frames"],
+        },
     }
 
 

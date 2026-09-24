@@ -1,3 +1,5 @@
+> **Archivado 2026-09-12** — pendientes vigentes consolidados en `openspec/changes/avatar-pendientes-criticos`. Este doc queda como registro histórico.
+
 ## 1. Fixes de código (app.js + server.py)
 
 - [x] 1.1 ~~Corregir nombres de huesos de cejas~~ — CANCELADO: los nombres reales en el GLB son `DEF-browTL`/`DEF-browTR` (sin puntos). El código original era correcto. Verificado con `[..._signAI.bones.keys()]`.
@@ -6,6 +8,10 @@
 - [x] 1.4 Verificar cejas visualmente con señas de emociones (0020–0027) — realizado. Reveló que los nombres de huesos en el GLB son sin puntos (`DEF-browTL`, no `DEF-brow.T.L`). El contexto del proyecto tenía la documentación incorrecta.
 
 ## 2. Avatar — mesh y textura (Blender)
+
+> Parcialmente mitigado en runtime por el change `avatar-shading-material` (2026-09-09):
+> material mate + `RoomEnvironment` IBL + tone mapping en `app.js`, sin re-exportar el GLB.
+> Lo de abajo sigue aplicando para **textura de piel UV real** y **más resolución de malla**.
 
 - [ ] 2.1 Abrir `blender/PruebaBlender2.blend` y verificar si el mesh tiene material/textura asignada
 - [ ] 2.2 Seleccionar o crear un mesh de mayor calidad con textura de piel (conservando el rig Rigify actual)

@@ -10,9 +10,11 @@ context: |
   ### Stack
   - Frontend 3D: Three.js r169 (ES modules, CDN jsDelivr)
   - Servidor: Flask Python, puerto 5000
-  - Rig: Rigify (Blender 5.2) exportado como GLB
+  - Rig: **AutoRigPro** (Blender) — `CopiaModelo.glb` — rama feature/nuevo-avatar-copiamodelo
+    (Rig anterior: Rigify/Prueba2.glb en rama master — OBSOLETO)
   - Landmark capture: MediaPipe Tasks API
   - Dataset: LSC50 (50 señas, 5 voluntarios, 4 reps = 1000 videos)
+  - HandCorrector: `app/hand_corrector.py` — corrige CONTACT/HOLD/BLEND + filtro temporal One-Euro (paso 3b) en secuencias de landmarks
 
   ### Dataset LSC50 — formato de IDs y archivos
   ID: `SSSS_VVVV_RRRR` = seña_voluntario_repetición (NO seña_rep_ángulo)
@@ -40,26 +42,16 @@ context: |
   - Mesh actual NO tiene textura ni material → aspecto de maniquí gris
   - Plan: reemplazar mesh por versión con textura conservando el rig Rigify
 
-  ### Nombres de huesos — CRÍTICO (verificado en GLB con [..._signAI.bones.keys()])
-  NINGÚN hueso de cara usa puntos en este GLB. La convención real es camelCase sin separadores.
-  Dedos: thumb01L, f_index01L, f_middle01L, f_ring01L, f_pinky01L (sin DEF-)
-  Brazos: DEF-upper_armL, DEF-upper_armL001, DEF-forearmL, DEF-forearmL001, DEF-handL (ídem R)
-  Cara (SIN puntos — formato DEF-{nombre}{Lado}{número}):
-    Cejas sup: DEF-browTL / DEF-browTL001 / DEF-browTL002 / DEF-browTL003  (Left)
-               DEF-browTR / DEF-browTR001 / DEF-browTR002 / DEF-browTR003  (Right)
-    Cejas inf: DEF-browBL … DEF-browBL004 / DEF-browBR … DEF-browBR004
-    Párpados:  DEF-lidTL / DEF-lidTL001–003 / DEF-lidTR / DEF-lidTR001–003  (superior)
-               DEF-lidBL / DEF-lidBL001–003 / DEF-lidBR / DEF-lidBR001–003  (inferior)
-    Labios:    DEF-lipTL / DEF-lipTL001 / DEF-lipTR / DEF-lipTR001  (superior)
-               DEF-lipBL / DEF-lipBL001 / DEF-lipBR / DEF-lipBR001  (inferior)
-    Mandíbula: DEF-jaw_master  (con guión bajo — correcto en código)
-               DEF-jaw / DEF-jawL / DEF-jawL001 / DEF-jawR / DEF-jawR001
-    Ojos:      DEF-eyeL / DEF-eyeR / DEF-eye_irisL / DEF-eye_irisR
-               DEF-eye_masterL / DEF-eye_masterR
+  ### Nombres de huesos — CRÍTICO (rig AutoRigPro, verificado con [..._signAI.bones.keys()])
+  Three.js elimina puntos de los nombres: arm_stretch.l → arm_stretchl, hand.l → handl.
+  Brazos: arm_stretchl, arm_twistl (NO animar), forearm_stretchl, forearm_twistl (NO animar), handl (ídem r)
+  Dedos: thumb1l/2l/3l, index1l/2l/3l, middle1l/2l/3l, ring1l/2l/3l, pinky1l/2l/3l (ídem r)
+  Metacarpianos: index1_basel, middle1_basel, ring1_basel, pinky1_basel (ídem r)
+  Hombro: shoulderl / shoulderr
 
-  ### Problemas conocidos del rig
-  - DEF-browTR tiene solo 4 vértices pesados vs 32 en DEF-browTL → ceja derecha casi estática
-  - Vertex weights asignados por Rigify automáticamente, corrección pendiente en Blender (tarea 2.3)
+  NOTA: Los nombres de cara (DEF-browTL, DEF-jaw_master, etc.) eran del rig Rigify anterior.
+  El rig AutoRigPro actual puede tener nombres diferentes — verificar con [..._signAI.bones.keys()]
+  antes de animar cara en el nuevo rig.
 
   ### Expresiones faciales requeridas (prioridad del proyecto)
   1. Duda: cejas asimétricas (DEF-browTL + DEF-browTR)
@@ -96,7 +88,8 @@ rules:
   tasks:
     - Tareas de código separadas de tareas de Blender/assets
     - Indicar si requiere re-exportar el GLB
-    - "Verificar nombres de huesos con [..._signAI.bones.keys()] — cara: camelCase sin puntos (DEF-browTL), dedos: sin DEF- (thumb01L)"
+    - "Verificar nombres de huesos con [..._signAI.bones.keys()] — rig AutoRigPro: arm_stretchl, handl, thumb1l (sin DEF-, sin puntos)"
+    - "Twist bones (arm_twistl, forearm_twistl) son hijos de stretch — NUNCA animar directamente"
   spec:
     - Documentar el formato CSV exacto si se describe captura de landmarks
     - Indicar la fuente (LSC50 vs video propio) para cada dato
@@ -107,7 +100,11 @@ operations:
       - Siempre verificar nombres de huesos en browser console con [..._signAI.bones.keys()]
       - Usar FACE_ALPHA = 1.0 para huesos faciales (no slerp)
       - No usar removeFromParent() en objetos WGT-*, solo obj.visible = false
-      - Los huesos de cara NO usan puntos en este GLB: DEF-browTL, DEF-lipTL, DEF-lidTL (camelCase, sin separadores)
+      - Rig AutoRigPro (CopiaModelo.glb) — brazos sin DEF-, sin puntos: arm_stretchl, handl, thumb1l
+      - NUNCA animar arm_twistl/forearm_twistl — son hijos de stretch, causarían doble rotación
+      - Z_SCALE = 0.15 (NO 0.40) en lmWorldOffset — valor reducido para permitir contacto entre manos
+      - CONTACT_BLEND = 0.8 en applyArmIK cuando frameState === 'CONTACT'
+      - HandCorrector integrado en server.py — lm0 (wrist) se preserva en CONTACT, solo lm1-20 se congelan
   archive:
     guidance:
       - Actualizar el estado actual del proyecto en config.yaml context si cambió algo relevante

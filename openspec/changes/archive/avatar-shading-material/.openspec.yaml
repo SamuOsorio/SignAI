@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-09-09
+# Solo cambios de shading en app.js. La spec viva (specs/avatar/spec.md) se
+# actualizó inline siguiendo la convención del repo (los otros changes no usan deltas).
+skip_specs: true
